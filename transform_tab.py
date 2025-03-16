@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, QTimer, QPropertyAnimation, 
 from PyQt6.QtGui import QIcon
 import json
 import os
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Any, Optional
 import numpy as np
 import time
 
@@ -229,15 +229,15 @@ class TransformTab(QWidget):
     MAX_STATUS_AXES = 3  # Maximum number of axes to show in status before truncating
     ANIMATION_BATCH_SIZE = 5  # Number of UI updates to batch during transitions
     
-    # Update signal to support multiple axes
-    transformPreviewRequested = Signal(str, dict)  # (transform_type, {axis: value})
-    transformApplied = Signal()
-    
-    # Add new signals for enhanced feedback
-    mode_transition_started = Signal(str, str)  # old_mode, new_mode
-    mode_transition_completed = Signal(str)  # new_mode
-    transform_state_changed = Signal(dict)  # transform_state
-    performance_warning = Signal(str)  # warning message
+    # Signals
+    transformApplied = pyqtSignal(str, dict)  # (transform_type, transform_params)
+    transformPreviewRequested = pyqtSignal(str, dict)  # (transform_type, {axis: value})
+    transformPreviewCanceled = pyqtSignal()
+    transformHistoryChanged = pyqtSignal()
+    modeChanged = pyqtSignal(str)
+    presetSelected = pyqtSignal(str)
+    presetSaved = pyqtSignal(str, dict)
+    presetDeleted = pyqtSignal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -532,7 +532,7 @@ class TransformTab(QWidget):
         self._active_axes.clear()
         
         # Emit signals
-        self.transformApplied.emit()
+        self.transformApplied.emit(self.current_transform_mode, transform_values)
         self._log_transform_applied(transform_values)
         
     def cancel_preview(self):

@@ -9,6 +9,7 @@ from viewport import Viewport
 from shapes_3d import Cube, Sphere, Cylinder
 from PyQt6.QtWidgets import QShortcut
 from PyQt6.QtGui import QKeySequence
+from transform_commands import UndoRedoManager, TransformCommand
 
 class CADCAMMainWindow(QMainWindow):
     def __init__(self):
@@ -30,6 +31,10 @@ class CADCAMMainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         tab_widget = QTabWidget()
         
+        # Initialize undo/redo manager
+        self.undo_redo_manager = UndoRedoManager()
+        self.undo_redo_manager.logger = self.logger  # Set logger for undo/redo operations
+        
         # Create and initialize tabs
         self.shapes_tab = ShapesTab()
         self.shapes_tab.shape_created.connect(self.onShapeCreated)
@@ -39,6 +44,10 @@ class CADCAMMainWindow(QMainWindow):
         self.transform_tab.transform_mode_changed.connect(self.onTransformModeChanged)
         self.transform_tab.snap_settings_changed.connect(self.onSnapSettingsChanged)
         self.transform_tab.axis_changed.connect(self.onAxisChanged)
+        
+        # Connect undo/redo signals
+        self.undo_redo_manager.undo_stack_changed.connect(self.updateUndoRedoButtons)
+        self.undo_redo_manager.redo_stack_changed.connect(self.updateUndoRedoButtons)
         
         boolean_tab = QWidget()
         cam_tab = QWidget()
@@ -59,6 +68,10 @@ class CADCAMMainWindow(QMainWindow):
         
         # Set up keyboard shortcuts
         self.setupShortcuts()
+        
+        # Connect transform-related signals
+        self.transform_tab.transformPreviewRequested.connect(self.on_transform_preview)
+        self.transform_tab.transformApplied.connect(self.on_transform_applied)
         
     def setupShortcuts(self):
         """Set up keyboard shortcuts."""
@@ -112,13 +125,13 @@ class CADCAMMainWindow(QMainWindow):
             
     def undoTransform(self):
         """Undo the last transform operation."""
-        if self.viewport.scene_manager.undo_transform():
+        if self.undo_redo_manager.undo():
             self.viewport.showStatusMessage("Transform Undone")
             self.viewport.update()
             
     def redoTransform(self):
         """Redo the last undone transform operation."""
-        if self.viewport.scene_manager.redo_transform():
+        if self.undo_redo_manager.redo():
             self.viewport.showStatusMessage("Transform Redone")
             self.viewport.update()
             
@@ -199,6 +212,14 @@ class CADCAMMainWindow(QMainWindow):
             
         # Set active axis based on parameter
         self.viewport.scene_manager.set_active_axis(parameters["axis"])
+        
+        # Capture states before transform
+        selected_shapes = [shape]
+        before_states = [{
+            'position': shape.transform.position.copy(),
+            'rotation': shape.transform.rotation.copy(),
+            'scale': shape.transform.scale.copy()
+        } for shape in selected_shapes]
             
         # Apply the transformation through the scene manager
         try:
@@ -207,6 +228,17 @@ class CADCAMMainWindow(QMainWindow):
                 parameters["mode"],
                 parameters  # Now includes snapping settings
             )
+            
+            # Capture states after transform
+            after_states = [{
+                'position': shape.transform.position.copy(),
+                'rotation': shape.transform.rotation.copy(),
+                'scale': shape.transform.scale.copy()
+            } for shape in selected_shapes]
+            
+            # Create and add command to undo stack
+            command = TransformCommand(selected_shapes, before_states, after_states, parameters)
+            self.undo_redo_manager.add_command(command)
             
             # Show success message
             mode_str = parameters["mode"].capitalize()
@@ -267,6 +299,128 @@ class CADCAMMainWindow(QMainWindow):
             self.viewport.scene_manager.set_active_axis(axis)
             self.viewport.showStatusMessage(f"Active Axis: {axis.upper()}")
             self.viewport.update()
+
+    def on_transform_preview(self, transform_type, value, axis):
+        """Handle transform preview requests."""
+        try:
+            if transform_type == 'cancel':
+                self.viewport.preview_overlay.stop_preview()
+                return
+                
+            # Update viewport preview
+            self.viewport.update_transform_preview(transform_type, value, axis)
+            
+            # Show transform info in status bar
+            self.show_transform_status(transform_type, value, axis)
+            
+        except Exception as e:
+            self.log_error(f"Transform preview error: {str(e)}")
+    
+    def on_transform_applied(self, transform_params):
+        """Handle transform application."""
+        try:
+            # Apply the transform to selected shapes
+            selected_shapes = self.viewport.get_selected_shapes()
+            if not selected_shapes:
+                self.show_status_message("No shapes selected")
+                return
+            
+            # Apply transform based on mode
+            mode = transform_params['mode']
+            if mode == 'translate':
+                values = transform_params['translate']
+                for shape in selected_shapes:
+                    shape.translate(values[0], values[1], values[2])
+            elif mode == 'rotate':
+                values = transform_params['rotate']
+                for shape in selected_shapes:
+                    shape.rotate(values[0], values[1], values[2])
+            else:  # scale
+                values = transform_params['scale']
+                for shape in selected_shapes:
+                    shape.scale(values[0], values[1], values[2])
+            
+            # Stop preview and update viewport
+            self.viewport.preview_overlay.stop_preview()
+            self.viewport.update()
+            
+            # Show success message
+            self.show_status_message(f"Applied {mode} transform")
+            
+            # Log the transform
+            self.log_transform_applied(transform_params)
+            
+        except Exception as e:
+            self.show_status_message(f"Error applying transform: {str(e)}")
+            self.log_error(f"Transform application error: {str(e)}")
+    
+    def show_transform_status(self, transform_type, value, axis):
+        """Show transform status in status bar."""
+        status_text = f"{transform_type.capitalize()} {axis.upper()}: {value:.2f}"
+        if transform_type == 'rotate':
+            status_text += "°"
+        self.statusBar().showMessage(status_text, 2000)
+    
+    def setup_transform_shortcuts(self):
+        """Setup keyboard shortcuts for transform operations."""
+        # Transform mode shortcuts
+        QShortcut(QKeySequence("G"), self, lambda: self.set_transform_mode('translate'))
+        QShortcut(QKeySequence("R"), self, lambda: self.set_transform_mode('rotate'))
+        QShortcut(QKeySequence("S"), self, lambda: self.set_transform_mode('scale'))
+        
+        # Axis shortcuts
+        QShortcut(QKeySequence("X"), self, lambda: self.set_transform_axis('x'))
+        QShortcut(QKeySequence("Y"), self, lambda: self.set_transform_axis('y'))
+        QShortcut(QKeySequence("Z"), self, lambda: self.set_transform_axis('z'))
+        
+        # Transform control shortcuts
+        QShortcut(QKeySequence("Return"), self, self.apply_current_transform)
+        QShortcut(QKeySequence("Escape"), self, self.cancel_current_transform)
+    
+    def set_transform_mode(self, mode):
+        """Set the current transform mode."""
+        self.transform_tab.current_transform_mode = mode
+        self.viewport.setTransformMode(mode)
+        self.show_status_message(f"Transform mode: {mode}")
+    
+    def set_transform_axis(self, axis):
+        """Set the current transform axis."""
+        self.transform_tab.current_axis = axis
+        self.viewport.setActiveAxis(axis)
+        self.show_status_message(f"Active axis: {axis.upper()}")
+    
+    def apply_current_transform(self):
+        """Apply the current transform."""
+        self.transform_tab.apply_transform()
+    
+    def cancel_current_transform(self):
+        """Cancel the current transform."""
+        self.transform_tab.cancel_preview()
+    
+    def show_status_message(self, message, timeout=2000):
+        """Show a message in the status bar."""
+        self.statusBar().showMessage(message, timeout)
+    
+    def log_transform_applied(self, transform_params):
+        """Log applied transform."""
+        self.logger.log_ui_change(
+            component="MainWindow",
+            change_type="transform_applied",
+            details=transform_params
+        )
+    
+    def log_error(self, message):
+        """Log error message."""
+        self.logger.log_ui_change(
+            component="MainWindow",
+            change_type="error",
+            details={'message': message}
+        )
+
+    def updateUndoRedoButtons(self):
+        """Update the enabled state of undo/redo buttons."""
+        self.transform_tab.undo_button.setEnabled(self.undo_redo_manager.can_undo())
+        self.transform_tab.redo_button.setEnabled(self.undo_redo_manager.can_redo())
 
 def main():
     app = QApplication(sys.argv)
