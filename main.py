@@ -188,6 +188,7 @@ class CADCAMMainWindow(QMainWindow):
         # Get the selected shape
         selected = self.viewport.scene_manager.get_selected_shape()
         if not selected:
+            self.viewport.showStatusMessage("No shape selected")
             return
             
         shape_id, shape = selected
@@ -200,15 +201,34 @@ class CADCAMMainWindow(QMainWindow):
         self.viewport.scene_manager.set_active_axis(parameters["axis"])
             
         # Apply the transformation through the scene manager
-        self.viewport.scene_manager.apply_transform(
-            shape_id,
-            parameters["mode"],
-            parameters  # Now includes snapping settings
-        )
-        
-        # Update transform tab with current transform
-        self.transform_tab.updateTransformValues(shape.transform)
-        
+        try:
+            self.viewport.scene_manager.apply_transform(
+                shape_id,
+                parameters["mode"],
+                parameters  # Now includes snapping settings
+            )
+            
+            # Show success message
+            mode_str = parameters["mode"].capitalize()
+            axis_str = parameters["axis"].upper()
+            value_str = f"{parameters.get('value', 0):.2f}"
+            relative_str = "Relative" if parameters.get('relative_mode', False) else "Absolute"
+            
+            if transform_type == "undo":
+                self.viewport.showStatusMessage("Undo: Previous transform reversed")
+            elif transform_type == "redo":
+                self.viewport.showStatusMessage("Redo: Transform reapplied")
+            else:
+                self.viewport.showStatusMessage(
+                    f"{mode_str} {axis_str}: {value_str} ({relative_str})"
+                )
+                
+            # Update transform tab with current transform
+            self.transform_tab.updateTransformValues(shape.transform)
+            
+        except Exception as e:
+            self.viewport.showStatusMessage(f"Error: {str(e)}")
+            
         # Update the viewport
         self.viewport.update()
         

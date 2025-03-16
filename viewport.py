@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QOpenGLWidget
 from PyQt6.QtCore import Qt, QPoint, QTimer
-from PyQt6.QtGui import QMatrix4x4, QVector3D, QVector4D, QPainter
+from PyQt6.QtGui import QMatrix4x4, QVector3D, QVector4D, QPainter, QColor, QRect
 from OpenGL.GL import *
 import numpy as np
 from shapes_3d import SceneManager, Cube
@@ -418,9 +418,18 @@ class Viewport(QOpenGLWidget):
         self.scene_manager.set_transform_mode(mode)
         self.updateCursor()
         
-        # Show status message
+        # Show status message with mode and keyboard shortcuts
         if mode:
-            self.showStatusMessage(f"Transform Mode: {mode.capitalize()}")
+            shortcuts = {
+                'translate': '(T)',
+                'rotate': '(R)',
+                'scale': '(S)'
+            }
+            relative = "Relative" if self.scene_manager.get_selected_shape() and \
+                      self.scene_manager.get_selected_shape()[1].relative_mode else "Absolute"
+            self.showStatusMessage(
+                f"Transform Mode: {mode.capitalize()} {shortcuts.get(mode, '')} - {relative} Mode"
+            )
         else:
             self.showStatusMessage("Transform Mode: None")
             
@@ -677,8 +686,8 @@ class Viewport(QOpenGLWidget):
         
         return np.array([x, y, z]) + qvector3d_to_numpy(self.camera_target)
 
-    def showStatusMessage(self, message, duration=2000):
-        """Show a status message for the specified duration (ms)."""
+    def showStatusMessage(self, message: str, duration: int = 3000):
+        """Show a status message in the viewport."""
         self.status_message = message
         self.status_timer.start(duration)
         self.update()
@@ -687,40 +696,44 @@ class Viewport(QOpenGLWidget):
         """Clear the current status message."""
         self.status_message = ""
         self.update()
-
+        
     def drawStatusMessage(self):
         """Draw the current status message."""
         if not self.status_message:
             return
             
-        # Switch to 2D rendering mode
-        glMatrixMode(GL_PROJECTION)
-        glPushMatrix()
-        glLoadIdentity()
-        glOrtho(0, self.width(), 0, self.height(), -1, 1)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glLoadIdentity()
-        
-        # Disable lighting and depth test
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        
-        # Draw text using QPainter
         painter = QPainter(self)
-        painter.setPen(Qt.GlobalColor.white)
-        painter.setFont(self.font())
-        painter.drawText(10, self.height() - 10, self.status_message)
-        painter.end()
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         
-        # Restore state
-        glEnable(GL_LIGHTING)
-        glEnable(GL_DEPTH_TEST)
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
-        glMatrixMode(GL_MODELVIEW)
-        glPopMatrix()
+        # Set up font and colors
+        font = painter.font()
+        font.setPointSize(10)
+        painter.setFont(font)
+        
+        # Draw text background
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(self.status_message)
+        text_height = metrics.height()
+        padding = 10
+        
+        bg_rect = QRect(
+            10,  # Left margin
+            self.height() - text_height - 2 * padding,  # Bottom margin
+            text_width + 2 * padding,
+            text_height + 2 * padding
+        )
+        
+        painter.fillRect(bg_rect, QColor(0, 0, 0, 128))
+        
+        # Draw text
+        painter.setPen(Qt.GlobalColor.white)
+        painter.drawText(
+            bg_rect,
+            Qt.AlignmentFlag.AlignCenter,
+            self.status_message
+        )
+        
+        painter.end()
 
     def updateSnapState(self, enabled):
         """Update snapping state and show feedback."""

@@ -11,6 +11,7 @@ from PyQt6.QtGui import QIcon
 import json
 import os
 from typing import Dict, List, Set
+import numpy as np
 
 class TransformPresetDialog(QDialog):
     def __init__(self, parent=None, categories: Set[str] = None, tags: Set[str] = None):
@@ -897,6 +898,27 @@ class TransformTab(QWidget):
         self.snap_rotate.setValue(snap['rotate'])
         self.snap_scale.setValue(snap['scale'])
         
+        # Create transform parameters
+        transform_params = {
+            'mode': preset['mode'],
+            'axis': preset['axis'],
+            'relative_mode': preset['relative'],
+            'snap': snap,
+            'value': 1.0  # Default value, will be adjusted based on mode
+        }
+        
+        # Adjust value based on transform mode
+        if preset['mode'] == 'rotate':
+            transform_params['value'] = 45.0  # Default rotation angle
+        elif preset['mode'] == 'scale':
+            transform_params['value'] = 1.0  # Default scale factor
+        else:  # translate
+            transform_params['value'] = snap['translate']  # Use grid size as default
+            
+        # Add to history and emit transform signal
+        self.addToHistory(preset['mode'], transform_params)
+        self.transform_applied.emit(preset['mode'], transform_params)
+
     def saveTransformAsPreset(self, item):
         """Save a specific transform as a preset."""
         index = item.data(Qt.ItemDataRole.UserRole)
@@ -965,24 +987,22 @@ class TransformTab(QWidget):
             self.savePresets()
             self.updateCategoryFilter()
             self.updatePresetCombo()
+
+    def updateTransformValues(self, transform):
+        """Update UI to reflect current transform values."""
+        # Update mode and axis if needed
+        if self._current_mode == 'translate':
+            self.translate_x.setValue(transform.position[0])
+            self.translate_y.setValue(transform.position[1])
+            self.translate_z.setValue(transform.position[2])
+        elif self._current_mode == 'rotate':
+            self.rotate_x.setValue(np.degrees(transform.rotation[0]))
+            self.rotate_y.setValue(np.degrees(transform.rotation[1]))
+            self.rotate_z.setValue(np.degrees(transform.rotation[2]))
+        elif self._current_mode == 'scale':
+            self.scale_x.setValue(transform.scale[0])
+            self.scale_y.setValue(transform.scale[1])
+            self.scale_z.setValue(transform.scale[2])
             
-    def onCategoryChanged(self, category: str):
-        """Handle category filter changes."""
-        self.updatePresetCombo(category)
-        
-    def updatePresetCombo(self, category: str = None):
-        """Update the presets combo box with optional category filter."""
-        self.preset_combo.clear()
-        
-        for name, preset in self._presets.items():
-            preset_category = preset.get('category', 'Uncategorized')
-            if category in (None, "All Categories") or preset_category == category:
-                self.preset_combo.addItem(name)
-                
-    def showPresetManager(self):
-        """Show the preset manager dialog."""
-        dialog = PresetManagerDialog(self, self._presets)
-        if dialog.exec():
-            self.savePresets()
-            self.updateCategoryFilter()
-            self.updatePresetCombo() 
+        # Update history list
+        self.updateHistoryList() 
