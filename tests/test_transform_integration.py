@@ -898,5 +898,211 @@ class TestTransformIntegration(unittest.TestCase):
             self.assertIn("Found 1 invalid shape count(s):", content)
             self.assertIn("Found 1 invalid duration(s):", content)
 
+    def test_empty_array_error(self):
+        """Test error handling for empty arrays."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test with empty shape_counts array
+        shape_counts = []
+        durations = [50, 150]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='empty_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error message content
+        with open(report_file, 'r') as f:
+            content = f.read()
+            self.assertIn("Array 'shape_counts' is empty", content)
+            self.assertIn("Please provide at least one data point", content)
+
+    def test_non_numeric_error(self):
+        """Test error handling for non-numeric values."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test with various non-numeric values
+        shape_counts = [100, 'abc', 1000]
+        durations = [50, {'value': 150}, 250]  # Object in durations
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='non_numeric_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error message content
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check string value error
+            self.assertIn("Invalid value type: expected number, got string ('abc')", content)
+            # Check object value error
+            self.assertIn("Invalid value type: expected number, got object", content)
+
+    def test_validation_summary(self):
+        """Test validation summary in export data."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with various validation issues
+        shape_counts = [100, float('nan'), 'invalid', 1000]
+        durations = [50, float('inf'), 'abc', 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='summary_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify validation summary
+        with open(report_file, 'r') as f:
+            content = f.read()
+            self.assertIn('"validation_summary":', content)
+            self.assertIn('"total_values": 8', content)
+            self.assertIn('"invalid_values": 4', content)
+            self.assertIn('"shape_count_errors": 2', content)
+            self.assertIn('"duration_errors": 2', content)
+
+    def test_comparison_validation_summary(self):
+        """Test validation summary in comparison export data."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with validation issues in both current and comparison
+        shape_counts = [100, float('nan'), 1000]
+        durations = [50, 150, 250]
+        comparison_data = {
+            'shape_counts': [100, 'invalid', 1000],
+            'durations': [45, float('inf'), 230]
+        }
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='comparison_summary_test',
+            comparison_data=comparison_data
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify comparison validation summary
+        with open(report_file, 'r') as f:
+            content = f.read()
+            self.assertIn('"validation_summary":', content)
+            self.assertIn('"total_values":', content)
+            self.assertIn('"invalid_values":', content)
+            self.assertIn('"current_errors":', content)
+            self.assertIn('"comparison_errors":', content)
+            # Check specific error messages
+            self.assertIn('Invalid numeric value: NaN', content)
+            self.assertIn('Invalid value type: expected number, got string', content)
+            self.assertIn('Invalid numeric value: Infinity', content)
+
+    def test_invalid_data_structure(self):
+        """Test error handling for invalid data structures."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test with null data
+        shape_counts = None
+        durations = [50, 150]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='invalid_structure_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error message content
+        with open(report_file, 'r') as f:
+            content = f.read()
+            self.assertIn('Invalid input: expected array, got null', content)
+
+    def test_detailed_type_errors(self):
+        """Test detailed error messages for type mismatches."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test with various invalid types
+        shape_counts = [100, [], {'count': 500}, 1000]  # Array and object in shape_counts
+        durations = [50, None, 250]  # Null in durations
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='type_error_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error message content
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check array value error
+            self.assertIn('Invalid value type: expected number, got array', content)
+            # Check object value error
+            self.assertIn('Invalid value type: expected number, got object', content)
+            # Check null value error
+            self.assertIn('Invalid value type: expected number, got null', content)
+
 if __name__ == '__main__':
     unittest.main() 
