@@ -33,6 +33,20 @@ class Shape3D:
         """Set the selection state of the shape"""
         self.selected = selected
 
+    def intersectRay(self, ray_origin, ray_direction):
+        """
+        Test if a ray intersects with this shape.
+        
+        Args:
+            ray_origin (QVector3D): Origin point of the ray in local space
+            ray_direction (QVector3D): Direction vector of the ray in local space
+            
+        Returns:
+            tuple: (hit, distance) where hit is a boolean indicating if there was an intersection,
+                  and distance is the distance from ray origin to the intersection point
+        """
+        return False, float('inf')  # Base class returns no intersection
+
 class Cube(Shape3D):
     """A basic cube shape centered at the origin"""
     def __init__(self, size=1.0):
@@ -129,6 +143,44 @@ class Cube(Shape3D):
             glLineWidth(1.0)
             
         glPopMatrix()
+
+    def intersectRay(self, ray_origin, ray_direction):
+        """
+        Test if a ray intersects with the cube using slab method.
+        The cube is centered at origin with size determined by self.size.
+        """
+        half_size = self.size / 2
+        bounds_min = QVector3D(-half_size, -half_size, -half_size)
+        bounds_max = QVector3D(half_size, half_size, half_size)
+        
+        # Initialize parameters for intersection
+        t_min = float('-inf')
+        t_max = float('inf')
+        
+        # Test intersection with each pair of planes
+        for i in range(3):
+            if abs(ray_direction[i]) < 1e-8:
+                # Ray is parallel to slab, check if origin is within slab
+                if ray_origin[i] < bounds_min[i] or ray_origin[i] > bounds_max[i]:
+                    return False, float('inf')
+            else:
+                # Calculate intersection distances
+                t1 = (bounds_min[i] - ray_origin[i]) / ray_direction[i]
+                t2 = (bounds_max[i] - ray_origin[i]) / ray_direction[i]
+                
+                # Ensure t1 is the smaller value
+                if t1 > t2:
+                    t1, t2 = t2, t1
+                
+                # Update intersection interval
+                t_min = max(t_min, t1)
+                t_max = min(t_max, t2)
+                
+                if t_min > t_max:
+                    return False, float('inf')
+        
+        # If we get here, the ray intersects the cube
+        return True, max(0, t_min)
 
 class Sphere(Shape3D):
     """A sphere shape centered at the origin"""
@@ -227,6 +279,35 @@ class Sphere(Shape3D):
             glLineWidth(1.0)
             
         glPopMatrix()
+
+    def intersectRay(self, ray_origin, ray_direction):
+        """
+        Test if a ray intersects with the sphere using quadratic equation.
+        The sphere is centered at origin with radius determined by self.radius.
+        """
+        # Calculate quadratic equation coefficients
+        a = ray_direction.lengthSquared()
+        b = 2.0 * QVector3D.dotProduct(ray_direction, ray_origin)
+        c = ray_origin.lengthSquared() - (self.radius * self.radius)
+        
+        # Calculate discriminant
+        discriminant = b * b - 4.0 * a * c
+        
+        if discriminant < 0:
+            return False, float('inf')  # No intersection
+            
+        # Calculate intersection distances
+        sqrt_discriminant = np.sqrt(discriminant)
+        t1 = (-b - sqrt_discriminant) / (2.0 * a)
+        t2 = (-b + sqrt_discriminant) / (2.0 * a)
+        
+        # Return closest positive intersection
+        if t1 > 0:
+            return True, t1
+        elif t2 > 0:
+            return True, t2
+        else:
+            return False, float('inf')
 
 class Cylinder(Shape3D):
     """A cylinder shape centered at the origin"""
@@ -360,6 +441,63 @@ class Cylinder(Shape3D):
             
         glPopMatrix()
 
+    def intersectRay(self, ray_origin, ray_direction):
+        """
+        Test if a ray intersects with the cylinder.
+        The cylinder is centered at origin with radius and height determined by self.radius and self.height.
+        """
+        half_height = self.height / 2
+        
+        # Test intersection with infinite cylinder
+        a = ray_direction.x() * ray_direction.x() + ray_direction.y() * ray_direction.y()
+        b = 2.0 * (ray_origin.x() * ray_direction.x() + ray_origin.y() * ray_direction.y())
+        c = ray_origin.x() * ray_origin.x() + ray_origin.y() * ray_origin.y() - self.radius * self.radius
+        
+        discriminant = b * b - 4.0 * a * c
+        
+        if discriminant < 0:
+            return False, float('inf')
+            
+        # Calculate cylinder intersection points
+        sqrt_discriminant = np.sqrt(discriminant)
+        t1 = (-b - sqrt_discriminant) / (2.0 * a)
+        t2 = (-b + sqrt_discriminant) / (2.0 * a)
+        
+        # Calculate z coordinates of intersection points
+        z1 = ray_origin.z() + t1 * ray_direction.z()
+        z2 = ray_origin.z() + t2 * ray_direction.z()
+        
+        # Check if intersection points are within cylinder height
+        t1_valid = t1 > 0 and -half_height <= z1 <= half_height
+        t2_valid = t2 > 0 and -half_height <= z2 <= half_height
+        
+        # Test intersection with caps
+        if ray_direction.z() != 0:
+            t_top = (half_height - ray_origin.z()) / ray_direction.z()
+            t_bottom = (-half_height - ray_origin.z()) / ray_direction.z()
+            
+            # Check if cap intersections are within radius
+            if t_top > 0:
+                p = ray_origin + ray_direction * t_top
+                if p.x() * p.x() + p.y() * p.y() <= self.radius * self.radius:
+                    if not t1_valid or t_top < t1:
+                        t1 = t_top
+                        t1_valid = True
+                        
+            if t_bottom > 0:
+                p = ray_origin + ray_direction * t_bottom
+                if p.x() * p.x() + p.y() * p.y() <= self.radius * self.radius:
+                    if not t1_valid or t_bottom < t1:
+                        t1 = t_bottom
+                        t1_valid = True
+        
+        if t1_valid:
+            return True, t1
+        elif t2_valid:
+            return True, t2
+        else:
+            return False, float('inf')
+
 class SceneManager:
     """Manages all shapes in the 3D scene"""
     def __init__(self):
@@ -384,8 +522,11 @@ class SceneManager:
             
     def selectShape(self, shape):
         """Select a shape and deselect others"""
+        # Deselect current shape if any
         if self.selected_shape:
             self.selected_shape.setSelected(False)
+            
+        # Select new shape if provided
         self.selected_shape = shape
         if shape:
             shape.setSelected(True)
