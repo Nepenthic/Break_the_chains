@@ -1104,5 +1104,256 @@ class TestTransformIntegration(unittest.TestCase):
             # Check null value error
             self.assertIn('Invalid value type: expected number, got null', content)
 
+    def test_csv_export_format(self):
+        """Test CSV export format integrity and data accuracy."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with various numeric formats
+        shape_counts = [100, 500.5, 1000]
+        durations = [50.123, 150.456, 250.789]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='csv_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify CSV export functionality
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check CSV structure
+            self.assertIn('Shape Count,Duration (ms)', content)
+            
+            # Verify decimal precision
+            self.assertIn('500.50', content)
+            self.assertIn('50.12', content)
+            
+            # Check newline handling
+            self.assertIn('\\n', content)  # Proper line endings
+            
+            # Verify export function call
+            self.assertIn('exportData(\'csv\')', content)
+
+    def test_json_export_structure(self):
+        """Test JSON export structure and metadata inclusion."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with metadata
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='json_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify JSON export functionality
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check JSON structure
+            self.assertIn('"data": {', content)
+            self.assertIn('"shape_counts":', content)
+            self.assertIn('"durations":', content)
+            
+            # Verify metadata inclusion
+            self.assertIn('"validation_summary":', content)
+            
+            # Check array formatting
+            self.assertIn('[100,', content)
+            
+            # Verify export function call
+            self.assertIn('exportData(\'json\')', content)
+
+    def test_excel_export_format(self):
+        """Test Excel export format and cell formatting."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with various numeric types
+        shape_counts = [100, 500.5, 1000]
+        durations = [50.123, 150.456, 250.789]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='excel_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify Excel export functionality
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check Excel structure
+            self.assertIn('Shape Count\\tDuration (ms)', content)
+            
+            # Verify number formatting
+            self.assertIn('500.50', content)
+            self.assertIn('50.12', content)
+            
+            # Check tab delimiter
+            self.assertIn('\\t', content)
+            
+            # Verify export function call
+            self.assertIn('exportData(\'excel\')', content)
+
+    def test_comparison_export_formats(self):
+        """Test export formats for comparison data."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with comparison
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        comparison_data = {
+            'shape_counts': [100, 500, 1000],
+            'durations': [45, 140, 230]
+        }
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='comparison_export_test',
+            comparison_data=comparison_data
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify comparison export formats
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check CSV format
+            self.assertIn('Shape Count,Current Duration (ms),Comparison Duration (ms)', content)
+            
+            # Check JSON structure
+            self.assertIn('"current": {', content)
+            self.assertIn('"comparison": {', content)
+            
+            # Check Excel format
+            self.assertIn('Shape Count\\tCurrent Duration (ms)\\tComparison Duration (ms)', content)
+            
+            # Verify export function calls
+            self.assertIn('exportComparisonData(\'csv\')', content)
+            self.assertIn('exportComparisonData(\'json\')', content)
+            self.assertIn('exportComparisonData(\'excel\')', content)
+
+    def test_export_filename_generation(self):
+        """Test export filename generation and timestamp formatting."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='filename_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify filename generation
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check timestamp inclusion
+            self.assertIn('new Date().toISOString().slice(0,19)', content)
+            
+            # Check file extensions
+            self.assertIn('.csv', content)
+            self.assertIn('.json', content)
+            self.assertIn('.xls', content)
+            
+            # Verify filename patterns
+            self.assertIn('performance_data_', content)
+            self.assertIn('comparison_data_', content)
+
+    def test_export_mime_types(self):
+        """Test MIME type handling for different export formats."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='mime_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify MIME type handling
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check MIME types
+            self.assertIn('text/csv', content)
+            self.assertIn('application/json', content)
+            self.assertIn('application/vnd.ms-excel', content)
+
 if __name__ == '__main__':
     unittest.main() 
