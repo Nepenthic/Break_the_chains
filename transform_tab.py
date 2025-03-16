@@ -5,13 +5,14 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                            QListWidget, QListWidgetItem, QMenu,
                            QLineEdit, QComboBox, QDialog, QInputDialog,
                            QDateTimeEdit, QSpinBox, QScrollArea,
-                           QFrame, QToolButton)
-from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
+                           QFrame, QToolButton, QProgressBar)
+from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, QTimer, QPropertyAnimation, QSequentialAnimationGroup, QAbstractAnimation
 from PyQt6.QtGui import QIcon
 import json
 import os
 from typing import Dict, List, Set
 import numpy as np
+import time
 
 class TransformPresetDialog(QDialog):
     def __init__(self, parent=None, categories: Set[str] = None, tags: Set[str] = None):
@@ -201,32 +202,387 @@ class PresetManagerDialog(QDialog):
         self.category_filter.addItems(sorted(self.getCategories()))
         self.filterPresets()
 
-class TransformTab(QWidget):
-    # Signals
-    transform_applied = pyqtSignal(str, dict)  # (transform_type, parameters)
-    transform_mode_changed = pyqtSignal(str)  # Current transform mode
-    snap_settings_changed = pyqtSignal(dict)  # Snapping settings
-    axis_changed = pyqtSignal(str)  # Active axis
+class TransformFeedback:
+    """Manages real-time visual feedback for transform operations."""
     
     def __init__(self):
-        super().__init__()
-        self._current_mode = None
-        self._active_axis = None
-        self._relative_mode = False  # Track relative/absolute mode
-        self._history = []  # Track transform history
-        self._history_index = -1  # Current position in history
-        self._grouped_history = []  # Track grouped transforms
-        self._filter_text = ""  # Track search filter
-        self._filter_type = "all"  # Track type filter
-        self._filter_axis = "all"  # Track axis filter
-        self._filter_date_start = None
-        self._filter_date_end = None
-        self._filter_value_min = None
-        self._filter_value_max = None
-        self._presets = self.loadPresets()
-        self.initUI()
+        self.active = False
+        self.current_transform = None
+        self.preview_overlay = None
+        self.performance_metrics = UIPerformanceMonitor()
+    
+    def start_transform_preview(self, transform_type, initial_value):
+        """Initialize transform preview overlay."""
+        self.active = True
+        self.current_transform = {
+            'type': transform_type,
+            'start_value': initial_value,
+            'start_time': time.perf_counter_ns()
+        }
         
-    def initUI(self):
+class TransformTab(QWidget):
+    """Widget for controlling object transformations with compound transform support."""
+    
+    # Constants for configuration and performance
+    TRANSITION_DURATION = 200  # Reduced from 300ms for better responsiveness
+    PERFORMANCE_THRESHOLD = 500  # milliseconds for slow operation warning
+    MAX_STATUS_AXES = 3  # Maximum number of axes to show in status before truncating
+    ANIMATION_BATCH_SIZE = 5  # Number of UI updates to batch during transitions
+    
+    # Update signal to support multiple axes
+    transformPreviewRequested = Signal(str, dict)  # (transform_type, {axis: value})
+    transformApplied = Signal()
+    
+    # Add new signals for enhanced feedback
+    mode_transition_started = Signal(str, str)  # old_mode, new_mode
+    mode_transition_completed = Signal(str)  # new_mode
+    transform_state_changed = Signal(dict)  # transform_state
+    performance_warning = Signal(str)  # warning message
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        self.current_transform_mode = 'translate'
+        self._preview_active = False
+        self._history = []
+        self._active_axes = {}  # {axis: spinbox} for active transforms
+        self._mode_transition_timer = QTimer()
+        self._mode_transition_timer.setSingleShot(True)
+        self._mode_transition_timer.timeout.connect(self._complete_mode_transition)
+        self._last_mode_switch_time = 0
+        
+        self._setup_ui()
+        self.connect_signals()
+        self._setup_mode_indicators()
+
+    def _setup_mode_indicators(self):
+        """Setup visual indicators for transform modes with accessibility support."""
+        # Create mode indicator widget with high contrast colors
+        self.mode_indicator = QFrame(self)
+        self.mode_indicator.setFrameShape(QFrame.Box)
+        self.mode_indicator.setFocusPolicy(Qt.StrongFocus)  # Enable keyboard focus
+        self.mode_indicator.setStyleSheet("""
+            QFrame {
+                border: 2px solid #2196F3;
+                border-radius: 4px;
+                background-color: rgba(33, 150, 243, 0.15);
+                margin: 4px;
+                padding: 2px;
+            }
+            QFrame:focus {
+                border-color: #1565C0;
+                background-color: rgba(33, 150, 243, 0.25);
+            }
+        """)
+        self.mode_indicator.setAccessibleName("Transform Mode Indicator")
+        self.mode_indicator.setAccessibleDescription("Shows current transform mode and state")
+        
+        # Mode label with icon and high contrast
+        self.mode_label = QLabel(self.mode_indicator)
+        self.mode_label.setAlignment(Qt.AlignCenter)
+        self.mode_label.setFocusPolicy(Qt.NoFocus)  # Parent frame handles focus
+        self.mode_label.setStyleSheet("""
+            QLabel {
+                color: #000000;
+                font-weight: bold;
+                padding: 4px;
+                font-size: 12pt;
+            }
+        """)
+        
+        # Status message with improved contrast
+        self.mode_status = QLabel(self.mode_indicator)
+        self.mode_status.setAlignment(Qt.AlignCenter)
+        self.mode_status.setFocusPolicy(Qt.NoFocus)  # Parent frame handles focus
+        self.mode_status.setStyleSheet("""
+            QLabel {
+                color: #424242;
+                font-size: 10pt;
+                padding: 2px;
+            }
+        """)
+        
+        # Layout for mode indicator
+        indicator_layout = QVBoxLayout(self.mode_indicator)
+        indicator_layout.addWidget(self.mode_label)
+        indicator_layout.addWidget(self.mode_status)
+        indicator_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Add to main layout
+        self.layout().insertWidget(0, self.mode_indicator)
+        
+        # Initialize mode display
+        self._update_mode_indicator('translate')
+        
+        # Setup keyboard navigation
+        self.mode_indicator.keyPressEvent = self._handle_mode_indicator_key_press
+
+    def _handle_mode_indicator_key_press(self, event):
+        """Handle keyboard navigation for mode indicator."""
+        if event.key() == Qt.Key_Space or event.key() == Qt.Key_Return:
+            # Toggle through modes: translate -> rotate -> scale -> translate
+            current_modes = ['translate', 'rotate', 'scale']
+            current_index = current_modes.index(self.current_transform_mode)
+            next_mode = current_modes[(current_index + 1) % len(current_modes)]
+            self._set_transform_mode(next_mode)
+        elif event.key() == Qt.Key_R:
+            # Toggle relative mode with 'R' key
+            self.relative_mode.setChecked(not self.relative_mode.isChecked())
+        else:
+            super().keyPressEvent(event)
+
+    def _animate_mode_transition(self, old_mode, new_mode):
+        """Animate the mode transition with optimized performance."""
+        start_time = time.perf_counter_ns()
+        
+        # Create fade out animation with batched updates
+        fade_out = QPropertyAnimation(self.mode_indicator, b"windowOpacity")
+        fade_out.setDuration(self.TRANSITION_DURATION // 2)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setUpdateInterval(self.TRANSITION_DURATION // self.ANIMATION_BATCH_SIZE)
+        
+        # Create fade in animation with batched updates
+        fade_in = QPropertyAnimation(self.mode_indicator, b"windowOpacity")
+        fade_in.setDuration(self.TRANSITION_DURATION // 2)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setUpdateInterval(self.TRANSITION_DURATION // self.ANIMATION_BATCH_SIZE)
+        
+        # Sequential animation group
+        transition = QSequentialAnimationGroup()
+        transition.addAnimation(fade_out)
+        transition.addAnimation(fade_in)
+        
+        # Connect to update indicator between animations
+        fade_out.finished.connect(lambda: self._update_mode_indicator(new_mode))
+        
+        # Monitor performance
+        transition.finished.connect(lambda: self._check_transition_performance(start_time))
+        
+        # Start animation
+        transition.start(QAbstractAnimation.DeleteWhenStopped)
+
+    def _check_transition_performance(self, start_time):
+        """Monitor transition performance and emit warnings if needed."""
+        duration = (time.perf_counter_ns() - start_time) / 1_000_000  # Convert to ms
+        if duration > self.PERFORMANCE_THRESHOLD:
+            warning = f"Slow mode transition detected: {duration:.1f}ms"
+            self.performance_warning.emit(warning)
+            print(f"Performance warning: {warning}")
+
+    def _update_mode_indicator(self, mode):
+        """Update the mode indicator display with accessibility support."""
+        mode_info = {
+            'translate': {
+                'icon': '⬌',
+                'color': '#2196F3',  # Blue
+                'text': 'Translation Mode',
+                'contrast_color': '#0D47A1',  # Darker blue for contrast
+                'tooltip': 'Translation Mode: Move objects along axes (Space/Enter to change mode)'
+            },
+            'rotate': {
+                'icon': '⟲',
+                'color': '#4CAF50',  # Green
+                'text': 'Rotation Mode',
+                'contrast_color': '#1B5E20',  # Darker green for contrast
+                'tooltip': 'Rotation Mode: Rotate objects around axes (Space/Enter to change mode)'
+            },
+            'scale': {
+                'icon': '⤧',
+                'color': '#FF9800',  # Orange
+                'text': 'Scale Mode',
+                'contrast_color': '#E65100',  # Darker orange for contrast
+                'tooltip': 'Scale Mode: Scale objects along axes (Space/Enter to change mode)'
+            }
+        }
+        
+        info = mode_info.get(mode, mode_info['translate'])
+        
+        # Update indicator style with high contrast and focus states
+        self.mode_indicator.setStyleSheet(f"""
+            QFrame {{
+                border: 2px solid {info['contrast_color']};
+                border-radius: 4px;
+                background-color: {info['color']}22;
+            }}
+            QFrame:hover {{
+                background-color: {info['color']}33;
+            }}
+            QFrame:focus {{
+                border-color: {info['contrast_color']};
+                background-color: {info['color']}44;
+                outline: none;
+            }}
+        """)
+        
+        # Update labels with accessibility
+        mode_text = f"{info['icon']} {info['text']}"
+        self.mode_label.setText(mode_text)
+        self.mode_label.setStyleSheet(f"""
+            QLabel {{
+                color: {info['contrast_color']};
+                font-weight: bold;
+                padding: 4px;
+            }}
+        """)
+        
+        # Update tooltips with consistent capitalization and keyboard shortcuts
+        self.mode_indicator.setToolTip(info['tooltip'])
+        
+        # Update status with consistent capitalization
+        relative_text = "Relative Mode" if self._relative_mode else "Absolute Mode"
+        axes_text = self._get_active_axes_text()
+        status_text = f"{relative_text} • {axes_text}"
+        self.mode_status.setText(status_text)
+        self.mode_status.setToolTip(f"Current Mode: {relative_text}\n{self._get_full_axes_text()}")
+
+    def _get_active_axes_text(self):
+        """Get truncated text representation of active axes."""
+        if not self._active_axes:
+            return "No Active Axes"
+        
+        axes = list(self._active_axes.keys())
+        if len(axes) <= self.MAX_STATUS_AXES:
+            return f"Active Axes: {', '.join(axes).upper()}"
+        return f"Active Axes: {', '.join(axes[:self.MAX_STATUS_AXES]).upper()}..."
+
+    def _get_full_axes_text(self):
+        """Get complete text representation of active axes for tooltip."""
+        if not self._active_axes:
+            return "No Active Axes"
+        return f"Active Axes: {', '.join(self._active_axes.keys()).upper()}"
+
+    def _set_transform_mode(self, mode):
+        """Set the current transform mode with visual transition and performance monitoring."""
+        if self.current_transform_mode != mode:
+            start_time = time.perf_counter_ns()
+            
+            # Start transition
+            old_mode = self.current_transform_mode
+            self.mode_transition_started.emit(old_mode, mode)
+            
+            # Cancel any active preview
+            self.cancel_preview()
+            
+            # Update mode
+            self.current_transform_mode = mode
+            
+            # Start transition animation
+            self._animate_mode_transition(old_mode, mode)
+            
+            # Update UI
+            self._update_ui_for_mode()
+            
+            # Start transition timer
+            self._mode_transition_timer.start(self.TRANSITION_DURATION)
+            
+            # Monitor performance
+            duration = (time.perf_counter_ns() - start_time) / 1_000_000  # Convert to ms
+            if duration > self.PERFORMANCE_THRESHOLD:
+                warning = f"Slow mode switch detected: {duration:.1f}ms"
+                self.performance_warning.emit(warning)
+                print(f"Performance warning: {warning}")
+
+    def _complete_mode_transition(self):
+        """Complete the mode transition."""
+        self.mode_transition_completed.emit(self.current_transform_mode)
+        self._update_transform_state()
+
+    def _update_transform_state(self):
+        """Update and emit the current transform state."""
+        state = {
+            'mode': self.current_transform_mode,
+            'relative': self._relative_mode,
+            'active_axes': list(self._active_axes.keys()),
+            'preview_active': self._preview_active,
+            'snap_enabled': self.snap_enabled.isChecked(),
+            'history_size': len(self._history)
+        }
+        self.transform_state_changed.emit(state)
+
+    def _update_ui_for_mode(self):
+        """Update UI elements for the current transform mode."""
+        # Update button states
+        self.translate_button.setChecked(self.current_transform_mode == 'translate')
+        self.rotate_button.setChecked(self.current_transform_mode == 'rotate')
+        self.scale_button.setChecked(self.current_transform_mode == 'scale')
+        
+        # Show/hide appropriate spinboxes
+        self.translate_group.setVisible(self.current_transform_mode == 'translate')
+        self.rotate_group.setVisible(self.current_transform_mode == 'rotate')
+        self.scale_group.setVisible(self.current_transform_mode == 'scale')
+        
+    def apply_transform(self):
+        """Apply the current compound transform."""
+        if not self._preview_active:
+            return
+            
+        # Get final transform values
+        transform_values = {a: sb.value() for a, sb in self._active_axes.items()}
+        
+        # Add to history
+        self._history.append({
+            'mode': self.current_transform_mode,
+            'values': transform_values.copy()
+        })
+        
+        # Reset preview state
+        self._preview_active = False
+        self._active_axes.clear()
+        
+        # Emit signals
+        self.transformApplied.emit()
+        self._log_transform_applied(transform_values)
+        
+    def cancel_preview(self):
+        """Cancel the current transform preview."""
+        if not self._preview_active:
+            return
+            
+        # Reset values to last applied state
+        if self._history:
+            last_transform = self._history[-1]
+            if last_transform['mode'] == self.current_transform_mode:
+                for axis, value in last_transform['values'].items():
+                    spinbox = self._get_spinbox_for_axis(axis)
+                    spinbox.setValue(value)
+        else:
+            # Reset to default values
+            for axis in 'xyz':
+                spinbox = self._get_spinbox_for_axis(axis)
+                spinbox.setValue(0.0 if self.current_transform_mode != 'scale' else 1.0)
+                
+        # Reset preview state
+        self._preview_active = False
+        self._active_axes.clear()
+        
+    def reset_transform_values(self):
+        """Reset all transform values to defaults."""
+        self.cancel_preview()
+        self._history.clear()
+        
+        # Reset all spinboxes to default values
+        for axis in 'xyz':
+            self.translate_x.setValue(0.0)
+            self.translate_y.setValue(0.0)
+            self.translate_z.setValue(0.0)
+            self.rotate_x.setValue(0.0)
+            self.rotate_y.setValue(0.0)
+            self.rotate_z.setValue(0.0)
+            self.scale_x.setValue(1.0)
+            self.scale_y.setValue(1.0)
+            self.scale_z.setValue(1.0)
+            
+    def _log_preview_update(self, values):
+        """Log preview updates for debugging."""
+        print(f"Preview update - Mode: {self.current_transform_mode}, Values: {values}")
+        
+    def _log_transform_applied(self, values):
+        """Log applied transforms for debugging."""
+        print(f"Transform applied - Mode: {self.current_transform_mode}, Values: {values}")
+
+    def setup_ui(self):
         layout = QVBoxLayout(self)
         
         # Transform mode selection
@@ -470,6 +826,22 @@ class TransformTab(QWidget):
         # Emit initial settings
         self.onSnapSettingsChanged()
         
+        # Add visual feedback indicators
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("QLabel { color: #2196F3; }")
+        self.layout().addWidget(self.status_label)
+        
+        # Add performance monitor widget
+        self.performance_widget = QWidget()
+        self.performance_layout = QVBoxLayout(self.performance_widget)
+        self.performance_indicator = QProgressBar()
+        self.performance_layout.addWidget(self.performance_indicator)
+        self.layout().addWidget(self.performance_widget)
+        
+        # Connect signals
+        self.transform_preview.connect(self.update_preview_overlay)
+        self.performance_alert.connect(self.show_performance_warning)
+        
     def setActiveAxis(self, axis):
         """Set the active axis."""
         for button in self.axis_group.buttons():
@@ -488,10 +860,18 @@ class TransformTab(QWidget):
         self.snap_enabled.setChecked(not self.snap_enabled.isChecked())
         
     def onRelativeModeChanged(self, state):
-        """Handle relative mode toggle."""
+        """Handle relative mode toggle with visual feedback."""
         self._relative_mode = bool(state)
         mode = "relative" if self._relative_mode else "absolute"
-        self.transform_mode_changed.emit(f"{self._current_mode}_{mode}")
+        
+        # Update mode indicator
+        self._update_mode_indicator(self.current_transform_mode)
+        
+        # Emit mode change signal
+        self.transform_mode_changed.emit(f"{self.current_transform_mode}_{mode}")
+        
+        # Update transform state
+        self._update_transform_state()
         
     def getTransformMode(self):
         """Get the current transform mode with relative/absolute state."""
@@ -608,10 +988,6 @@ class TransformTab(QWidget):
 
     def addToHistory(self, transform_type, parameters):
         """Add a transform operation to the history."""
-        # Remove any redo history if we're not at the end
-        while len(self._history) > self._history_index + 1:
-            self._history.pop()
-            
         # Add new transform to history
         transform_info = {
             'type': transform_type,
@@ -619,69 +995,41 @@ class TransformTab(QWidget):
             'timestamp': QDateTime.currentDateTime()
         }
         self._history.append(transform_info)
-        self._history_index += 1
+        self._history_index = len(self._history) - 1
         
         # Update history list
         self.updateHistoryList()
         
-        # Enable/disable undo/redo buttons
-        self.updateUndoRedoState()
-        
     def updateHistoryList(self):
         """Update the history list widget with filtering."""
         self.history_list.clear()
-        current_group = None
-        group_items = []
-        visible_indices = []  # Track which items are visible
         
         for i, transform in enumerate(self._history):
             # Check if transform should be shown
             if not self.shouldShowTransform(transform):
                 continue
                 
-            visible_indices.append(i)
             timestamp = transform['timestamp'].toString('hh:mm:ss')
             mode = transform['params']['mode']
             axis = transform['params']['axis']
             value = transform['params'].get('value', 0)
             relative = "Relative" if transform['params'].get('relative_mode', False) else "Absolute"
             
-            if transform['group_id'] != current_group:
-                # If we have a previous group, add it
-                if group_items:
-                    self.addGroupToList(group_items)
-                    group_items = []
-                current_group = transform['group_id']
-            
             item_text = f"{timestamp} - {mode.capitalize()} {axis.upper()}: {value:.2f} ({relative})"
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, i)  # Store history index
             
-            if transform['group_id'] is not None:
-                group_items.append(item)
-            else:
-                # Highlight current position in history
-                if i == self._history_index:
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                self.history_list.addItem(item)
+            # Highlight current position in history
+            if i == self._history_index:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self.history_list.addItem(item)
+            
+        # Scroll to current position
+        if self._history_index >= 0:
+            self.history_list.scrollToItem(self.history_list.item(self._history_index))
         
-        # Add any remaining group
-        if group_items:
-            self.addGroupToList(group_items)
-            
-        # Update group button state
-        self.group_button.setEnabled(len(self.history_list.selectedItems()) > 1)
-            
-        # Scroll to current position if visible
-        if self._history_index in visible_indices:
-            for i in range(self.history_list.count()):
-                item = self.history_list.item(i)
-                if item.data(Qt.ItemDataRole.UserRole) == self._history_index:
-                    self.history_list.scrollToItem(item)
-                    break
-                    
     def shouldShowTransform(self, transform):
         """Check if a transform should be shown based on current filters."""
         # Check text filter
@@ -790,38 +1138,13 @@ class TransformTab(QWidget):
         
     def undoTransform(self):
         """Undo the last transform operation."""
-        if self._history_index >= 0:
-            self._history_index -= 1
-            self.updateHistoryList()
-            self.updateUndoRedoState()
-            # Emit signal to main window
-            self.transform_applied.emit("undo", {})
+        # This is now handled by MainWindow's UndoRedoManager
+        self.transformApplied.emit("undo", {})
             
     def redoTransform(self):
         """Redo the last undone transform operation."""
-        if self._history_index < len(self._history) - 1:
-            self._history_index += 1
-            transform = self._history[self._history_index]
-            self.updateHistoryList()
-            self.updateUndoRedoState()
-            # Emit signal to main window
-            self.transform_applied.emit("redo", transform['params'])
-            
-    def onHistoryItemDoubleClicked(self, item):
-        """Handle clicking on a history item."""
-        index = self.history_list.row(item)
-        if index == self._history_index:
-            return
-            
-        # Determine if we're undoing or redoing
-        if index < self._history_index:
-            # Undo operations until we reach the clicked index
-            while self._history_index > index:
-                self.undoTransform()
-        else:
-            # Redo operations until we reach the clicked index
-            while self._history_index < index:
-                self.redoTransform()
+        # This is now handled by MainWindow's UndoRedoManager
+        self.transformApplied.emit("redo", {})
 
     def loadPresets(self):
         """Load transform presets from file."""
@@ -1006,3 +1329,87 @@ class TransformTab(QWidget):
             
         # Update history list
         self.updateHistoryList() 
+
+    def on_transform_value_changed(self, value):
+        """Handle transform value changes with real-time feedback."""
+        try:
+            with self.performance_monitor.measure('transform_update'):
+                # Get current transform parameters
+                transform_params = self.get_current_transform_params()
+                
+                # Update preview
+                self.transform_preview.emit(self.current_mode, {
+                    'value': value,
+                    'axis': self._active_axis,
+                    'preview': True
+                })
+                
+                # Log the change
+                self.log_transform_update(transform_params)
+                
+                # Check performance
+                if self.performance_monitor.should_alert():
+                    self.performance_alert.emit('transform_latency', {
+                        'duration': self.performance_monitor.last_duration,
+                        'threshold': self.performance_monitor.thresholds['transform_update']
+                    })
+        
+        except Exception as e:
+            self.log_error(f"Transform update error: {str(e)}")
+            self.status_label.setText("Error updating transform")
+    
+    def update_preview_overlay(self, transform_type, params):
+        """Update transform preview overlay."""
+        try:
+            if not self.feedback.active:
+                self.feedback.start_transform_preview(transform_type, params['value'])
+            
+            # Update overlay
+            self.viewport().update_transform_preview(
+                transform_type,
+                params['value'],
+                params['axis']
+            )
+            
+            # Update status
+            self.status_label.setText(
+                f"Previewing {transform_type} on {params['axis']} axis: {params['value']:.2f}"
+            )
+            
+        except Exception as e:
+            self.log_error(f"Preview update error: {str(e)}")
+    
+    def show_performance_warning(self, metric_type, data):
+        """Show performance warning to user."""
+        if metric_type == 'transform_latency':
+            message = (
+                f"Transform operation taking longer than expected "
+                f"({data['duration']:.1f}ms > {data['threshold']:.1f}ms)"
+            )
+            self.status_label.setText(message)
+            self.status_label.setStyleSheet("QLabel { color: #FFA000; }")
+    
+    def log_transform_update(self, params):
+        """Log transform updates with performance metrics."""
+        self.ui_logger.log_ui_change(
+            component="TransformTab",
+            change_type="transform_update",
+            details={
+                'mode': self.current_mode,
+                'params': params,
+                'performance': self.performance_monitor.get_metrics()
+            }
+        )
+    
+    def setup_logging(self):
+        """Initialize UI change logging."""
+        self.ui_logger = UIChangeLogger()
+        self.ui_logger.set_log_level('INFO')
+        
+    def log_error(self, message):
+        """Log error messages."""
+        self.ui_logger.log_ui_change(
+            component="TransformTab",
+            change_type="error",
+            details={'message': message}
+        ) 
