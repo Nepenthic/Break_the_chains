@@ -1,8 +1,10 @@
 import plotly.graph_objs as go
 import plotly.io as pio
+from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime
 import os
+import json
 
 class PerformanceVisualizer:
     """Generates interactive visualizations for performance test results."""
@@ -10,49 +12,78 @@ class PerformanceVisualizer:
     def __init__(self, output_dir='reports'):
         """Initialize visualizer with output directory."""
         self.output_dir = output_dir
+        self.data_dir = os.path.join(output_dir, 'data')
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(self.data_dir, exist_ok=True)
         
         # Set default Plotly template
         pio.templates.default = "plotly_white"
     
-    def plot_transform_durations(self, shape_counts, durations, test_type='batch'):
+    def save_test_data(self, test_data, run_id=None):
+        """Save test data for future comparisons."""
+        if run_id is None:
+            run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        data_file = os.path.join(self.data_dir, f'test_data_{run_id}.json')
+        with open(data_file, 'w') as f:
+            json.dump(test_data, f, indent=2)
+        
+        return run_id
+    
+    def load_test_data(self, run_id):
+        """Load test data from a previous run."""
+        data_file = os.path.join(self.data_dir, f'test_data_{run_id}.json')
+        with open(data_file, 'r') as f:
+            return json.load(f)
+    
+    def list_available_runs(self):
+        """List available test runs for comparison."""
+        runs = []
+        for file in os.listdir(self.data_dir):
+            if file.startswith('test_data_') and file.endswith('.json'):
+                run_id = file[10:-5]  # Remove 'test_data_' and '.json'
+                runs.append(run_id)
+        return sorted(runs, reverse=True)
+    
+    def plot_transform_durations(self, shape_counts, durations, test_type='batch', 
+                               comparison_data=None, filters=None):
         """Generate interactive line plot of transform durations vs shape count."""
-        fig = go.Figure()
+        # Apply filters if provided
+        if filters:
+            filtered_indices = self._apply_filters(shape_counts, filters)
+            shape_counts = [shape_counts[i] for i in filtered_indices]
+            durations = [durations[i] for i in filtered_indices]
         
-        # Add duration scatter plot
-        fig.add_trace(go.Scatter(
-            x=shape_counts,
-            y=durations,
-            mode='lines+markers',
-            name='Duration (ms)',
-            line=dict(width=2, color='#1f77b4'),
-            marker=dict(size=10),
-            hovertemplate='Shape Count: %{x}<br>Duration: %{y:.2f} ms<extra></extra>'
-        ))
+        # Create figure based on comparison mode
+        if comparison_data:
+            fig = make_subplots(rows=1, cols=2, 
+                              subplot_titles=("Current Run", "Comparison Run"),
+                              horizontal_spacing=0.1)
+            
+            # Current run
+            self._add_duration_traces(fig, shape_counts, durations, row=1, col=1)
+            
+            # Comparison run
+            comp_shape_counts = comparison_data['shape_counts']
+            comp_durations = comparison_data['durations']
+            if filters:
+                filtered_indices = self._apply_filters(comp_shape_counts, filters)
+                comp_shape_counts = [comp_shape_counts[i] for i in filtered_indices]
+                comp_durations = [comp_durations[i] for i in filtered_indices]
+            self._add_duration_traces(fig, comp_shape_counts, comp_durations, row=1, col=2)
+            
+            fig.update_layout(height=600)
+        else:
+            fig = go.Figure()
+            self._add_duration_traces(fig, shape_counts, durations)
         
-        # Add trend line
-        z = np.polyfit(shape_counts, durations, 1)
-        p = np.poly1d(z)
-        trend_x = np.array(shape_counts)
-        trend_y = p(trend_x)
-        fig.add_trace(go.Scatter(
-            x=trend_x,
-            y=trend_y,
-            mode='lines',
-            name=f'Trend (slope: {z[0]:.2f})',
-            line=dict(dash='dash', color='#ff7f0e'),
-            hovertemplate='Shape Count: %{x}<br>Predicted: %{y:.2f} ms<extra></extra>'
-        ))
-        
+        # Update layout
         fig.update_layout(
             title=dict(
                 text=f'{test_type.title()} Transform Duration vs Shape Count',
                 x=0.5,
                 font=dict(size=20)
             ),
-            xaxis_title=dict(text='Shape Count', font=dict(size=14)),
-            yaxis_title=dict(text='Duration (ms)', font=dict(size=14)),
-            hovermode='closest',
             showlegend=True,
             legend=dict(
                 yanchor="top",
@@ -63,16 +94,76 @@ class PerformanceVisualizer:
             margin=dict(t=100, l=80, r=80, b=80)
         )
         
+        # Add range slider for time series exploration
+        fig.update_xaxes(rangeslider_visible=True)
+        
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'{self.output_dir}/transform_duration_{test_type}_{timestamp}.html'
+        
+        # Add interactive controls
         fig.write_html(
             filename,
             include_plotlyjs='cdn',
             full_html=True,
-            config={'displayModeBar': True, 'responsive': True}
+            config={
+                'displayModeBar': True,
+                'responsive': True,
+                'modeBarButtonsToAdd': ['drawline', 'drawopenpath', 'eraseshape']
+            }
         )
         
         return filename
+    
+    def _add_duration_traces(self, fig, shape_counts, durations, row=1, col=1):
+        """Add duration and trend traces to the figure."""
+        # Duration scatter plot
+        fig.add_trace(
+            go.Scatter(
+                x=shape_counts,
+                y=durations,
+                mode='lines+markers',
+                name='Duration (ms)',
+                line=dict(width=2, color='#1f77b4'),
+                marker=dict(size=10),
+                hovertemplate='Shape Count: %{x}<br>Duration: %{y:.2f} ms<extra></extra>'
+            ),
+            row=row, col=col
+        )
+        
+        # Trend line
+        z = np.polyfit(shape_counts, durations, 1)
+        p = np.poly1d(z)
+        trend_x = np.array(shape_counts)
+        trend_y = p(trend_x)
+        fig.add_trace(
+            go.Scatter(
+                x=trend_x,
+                y=trend_y,
+                mode='lines',
+                name=f'Trend (slope: {z[0]:.2f})',
+                line=dict(dash='dash', color='#ff7f0e'),
+                hovertemplate='Shape Count: %{x}<br>Predicted: %{y:.2f} ms<extra></extra>'
+            ),
+            row=row, col=col
+        )
+    
+    def _apply_filters(self, values, filters):
+        """Apply filters to data series."""
+        indices = []
+        for i, value in enumerate(values):
+            include = True
+            for filter_key, filter_value in filters.items():
+                if filter_key == 'min_value' and value < filter_value:
+                    include = False
+                elif filter_key == 'max_value' and value > filter_value:
+                    include = False
+                elif filter_key == 'value_range':
+                    min_val, max_val = filter_value
+                    if value < min_val or value > max_val:
+                        include = False
+            if include:
+                indices.append(i)
+        return indices
     
     def plot_memory_usage(self, shape_counts, memory_usage, test_type='batch'):
         """Generate interactive bar plot of memory usage per test scenario."""
@@ -192,6 +283,62 @@ class PerformanceVisualizer:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         html_file = f'{self.output_dir}/performance_report_{timestamp}.html'
         
+        # Add JavaScript for interactive filtering
+        js_code = """
+        <script>
+        function filterData(chartId, minValue, maxValue) {
+            var chart = document.getElementById(chartId);
+            var update = {
+                'xaxis.range': [minValue, maxValue]
+            };
+            Plotly.relayout(chart, update);
+        }
+        
+        function toggleComparison(chartId, showComparison) {
+            var chart = document.getElementById(chartId);
+            var update = {
+                'visible': showComparison ? [true, true] : [true, false]
+            };
+            Plotly.restyle(chart, update);
+        }
+        
+        function updateChartType(chartId, type) {
+            var chart = document.getElementById(chartId);
+            var update = {'type': type};
+            Plotly.restyle(chart, update);
+        }
+        </script>
+        """
+        
+        # Add filter controls HTML
+        filter_controls = """
+        <div class="filter-controls">
+            <div class="control-group">
+                <label for="shape-count-min">Min Shape Count:</label>
+                <input type="number" id="shape-count-min" value="0" 
+                       onchange="filterData('duration-chart', this.value, document.getElementById('shape-count-max').value)">
+            </div>
+            <div class="control-group">
+                <label for="shape-count-max">Max Shape Count:</label>
+                <input type="number" id="shape-count-max" value="5000"
+                       onchange="filterData('duration-chart', document.getElementById('shape-count-min').value, this.value)">
+            </div>
+            <div class="control-group">
+                <label for="comparison-toggle">Show Comparison:</label>
+                <input type="checkbox" id="comparison-toggle"
+                       onchange="toggleComparison('duration-chart', this.checked)">
+            </div>
+            <div class="control-group">
+                <label for="chart-type">Chart Type:</label>
+                <select id="chart-type" onchange="updateChartType('duration-chart', this.value)">
+                    <option value="scatter">Line + Markers</option>
+                    <option value="bar">Bar</option>
+                    <option value="heatmap">Heatmap</option>
+                </select>
+            </div>
+        </div>
+        """
+        
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -262,7 +409,39 @@ class PerformanceVisualizer:
                     font-weight: bold;
                     color: {self._get_success_rate_color(report_data)}
                 }}
+                .filter-controls {{
+                    background: #fff;
+                    padding: 20px;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    margin: 20px 0;
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 20px;
+                }}
+                .control-group {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 5px;
+                }}
+                .control-group label {{
+                    font-size: 14px;
+                    color: #2c3e50;
+                }}
+                .control-group input[type="number"] {{
+                    width: 100px;
+                    padding: 5px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                }}
+                .control-group select {{
+                    padding: 5px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    background: #fff;
+                }}
             </style>
+            {js_code}
         </head>
         <body>
             <div class="container">
@@ -306,6 +485,8 @@ class PerformanceVisualizer:
                     <h2>System Information</h2>
                     {self._generate_system_info_section(report_data['system_info'])}
                 </div>
+                
+                {filter_controls}
             </div>
         </body>
         </html>
