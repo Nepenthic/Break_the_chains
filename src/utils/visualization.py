@@ -13,8 +13,10 @@ class PerformanceVisualizer:
         """Initialize visualizer with output directory."""
         self.output_dir = output_dir
         self.data_dir = os.path.join(output_dir, 'data')
+        self.export_dir = os.path.join(output_dir, 'exports')
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.export_dir, exist_ok=True)
         
         # Set default Plotly template
         pio.templates.default = "plotly_white"
@@ -100,7 +102,38 @@ class PerformanceVisualizer:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'{self.output_dir}/transform_duration_{test_type}_{timestamp}.html'
         
-        # Add interactive controls
+        # Prepare data for JavaScript
+        if comparison_data:
+            js_data = f"""
+            <script>
+            window.currentData = {{
+                shape_counts: {json.dumps(shape_counts)},
+                durations: {json.dumps(durations)}
+            }};
+            window.comparisonData = {{
+                current: {{
+                    shape_counts: {json.dumps(shape_counts)},
+                    durations: {json.dumps(durations)}
+                }},
+                comparison: {{
+                    shape_counts: {json.dumps(comp_shape_counts)},
+                    durations: {json.dumps(comp_durations)}
+                }}
+            }};
+            </script>
+            """
+        else:
+            js_data = f"""
+            <script>
+            window.currentData = {{
+                shape_counts: {json.dumps(shape_counts)},
+                durations: {json.dumps(durations)}
+            }};
+            window.comparisonData = null;
+            </script>
+            """
+        
+        # Add interactive controls and export functionality
         fig.write_html(
             filename,
             include_plotlyjs='cdn',
@@ -109,7 +142,8 @@ class PerformanceVisualizer:
                 'displayModeBar': True,
                 'responsive': True,
                 'modeBarButtonsToAdd': ['drawline', 'drawopenpath', 'eraseshape']
-            }
+            },
+            post_script=js_data
         )
         
         return filename
@@ -283,7 +317,7 @@ class PerformanceVisualizer:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         html_file = f'{self.output_dir}/performance_report_{timestamp}.html'
         
-        # Add JavaScript for interactive filtering
+        # Add JavaScript for interactive filtering and export functionality
         js_code = """
         <script>
         function filterData(chartId, minValue, maxValue) {
@@ -307,11 +341,106 @@ class PerformanceVisualizer:
             var update = {'type': type};
             Plotly.restyle(chart, update);
         }
+        
+        function exportData(format) {
+            var data = window.currentData;
+            if (!data) {
+                alert('No data available to export.');
+                return;
+            }
+            
+            var content, filename, type;
+            if (format === 'csv') {
+                content = 'Shape Count,Duration (ms)\\n';
+                data.shape_counts.forEach((count, i) => {
+                    content += `${count},${data.durations[i]}\\n`;
+                });
+                filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
+                type = 'text/csv';
+            } else if (format === 'json') {
+                content = JSON.stringify(data, null, 2);
+                filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
+                type = 'application/json';
+            } else if (format === 'excel') {
+                content = 'Shape Count\\tDuration (ms)\\n';
+                data.shape_counts.forEach((count, i) => {
+                    content += `${count}\\t${data.durations[i]}\\n`;
+                });
+                filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
+                type = 'application/vnd.ms-excel';
+            }
+            
+            downloadFile(content, filename, type);
+        }
+        
+        function exportComparisonData(format) {
+            var data = window.comparisonData;
+            if (!data) {
+                alert('No comparison data available to export.');
+                return;
+            }
+            
+            var content, filename, type;
+            if (format === 'csv') {
+                content = 'Shape Count,Current Duration (ms),Comparison Duration (ms)\\n';
+                data.current.shape_counts.forEach((count, i) => {
+                    content += `${count},${data.current.durations[i]},${data.comparison.durations[i]}\\n`;
+                });
+                filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
+                type = 'text/csv';
+            } else if (format === 'json') {
+                content = JSON.stringify(data, null, 2);
+                filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
+                type = 'application/json';
+            } else if (format === 'excel') {
+                content = 'Shape Count\\tCurrent Duration (ms)\\tComparison Duration (ms)\\n';
+                data.current.shape_counts.forEach((count, i) => {
+                    content += `${count}\\t${data.current.durations[i]}\\t${data.comparison.durations[i]}\\n`;
+                });
+                filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
+                type = 'application/vnd.ms-excel';
+            }
+            
+            downloadFile(content, filename, type);
+        }
+        
+        function downloadFile(content, filename, type) {
+            var blob = new Blob([content], { type: type });
+            var link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
         </script>
         """
         
-        # Add filter controls HTML
-        filter_controls = """
+        # Add export controls HTML
+        export_controls = """
+        <div class="export-controls">
+            <h3>Export Data</h3>
+            <div class="control-group">
+                <label>Current Data:</label>
+                <div class="button-group">
+                    <button onclick="exportData('csv')" class="export-button">CSV</button>
+                    <button onclick="exportData('json')" class="export-button">JSON</button>
+                    <button onclick="exportData('excel')" class="export-button">Excel</button>
+                </div>
+            </div>
+            <div class="control-group">
+                <label>Comparison Data:</label>
+                <div class="button-group">
+                    <button onclick="exportComparisonData('csv')" class="export-button">CSV</button>
+                    <button onclick="exportComparisonData('json')" class="export-button">JSON</button>
+                    <button onclick="exportComparisonData('excel')" class="export-button">Excel</button>
+                </div>
+            </div>
+        </div>
+        """
+        
+        # Combine with existing filter controls
+        filter_controls = f"""
         <div class="filter-controls">
             <div class="control-group">
                 <label for="shape-count-min">Min Shape Count:</label>
@@ -336,6 +465,7 @@ class PerformanceVisualizer:
                     <option value="heatmap">Heatmap</option>
                 </select>
             </div>
+            {export_controls}
         </div>
         """
         
@@ -440,6 +570,34 @@ class PerformanceVisualizer:
                     border-radius: 4px;
                     background: #fff;
                 }}
+                .export-controls {{
+                    margin-top: 20px;
+                    padding: 20px;
+                    background: #fff;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }}
+                .export-controls h3 {{
+                    margin: 0 0 15px 0;
+                    color: #2c3e50;
+                }}
+                .button-group {{
+                    display: flex;
+                    gap: 10px;
+                    margin-top: 5px;
+                }}
+                .export-button {{
+                    padding: 8px 15px;
+                    border: none;
+                    border-radius: 4px;
+                    background: #3498db;
+                    color: white;
+                    cursor: pointer;
+                    transition: background 0.2s;
+                }}
+                .export-button:hover {{
+                    background: #2980b9;
+                }}
             </style>
             {js_code}
         </head>
@@ -449,6 +607,8 @@ class PerformanceVisualizer:
                     <h1>Performance Test Report</h1>
                     <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
                 </div>
+                
+                {filter_controls}
                 
                 <div class="metrics">
                     <div class="metric-box">
@@ -485,8 +645,6 @@ class PerformanceVisualizer:
                     <h2>System Information</h2>
                     {self._generate_system_info_section(report_data['system_info'])}
                 </div>
-                
-                {filter_controls}
             </div>
         </body>
         </html>

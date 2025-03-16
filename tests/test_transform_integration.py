@@ -517,5 +517,99 @@ class TestTransformIntegration(unittest.TestCase):
             self.assertIn('comparison-toggle', content)
             self.assertIn('chart-type', content)
 
+    def test_export_functionality(self):
+        """Test export functionality in the HTML report."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        
+        # Test single dataset export
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations, 
+            test_type='export_test'
+        )
+        
+        # Generate report
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            }, 
+            [chart_file]
+        )
+        
+        # Verify export controls and functionality
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check for export controls
+            self.assertIn('export-controls', content)
+            self.assertIn('exportData', content)
+            self.assertIn('exportComparisonData', content)
+            # Check for export buttons
+            self.assertIn('Export Data', content)
+            self.assertIn('onclick="exportData(\'csv\')"', content)
+            self.assertIn('onclick="exportData(\'json\')"', content)
+            self.assertIn('onclick="exportData(\'excel\')"', content)
+            # Check for data embedding
+            self.assertIn('window.currentData', content)
+            self.assertIn('"shape_counts":', content)
+            self.assertIn('"durations":', content)
+        
+        # Test comparison dataset export
+        comparison_data = {
+            'shape_counts': [100, 500, 1000],
+            'durations': [45, 140, 230]
+        }
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='export_test_comparison',
+            comparison_data=comparison_data
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify comparison export functionality
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check for comparison data embedding
+            self.assertIn('window.comparisonData', content)
+            self.assertIn('"current":', content)
+            self.assertIn('"comparison":', content)
+            # Check for comparison export buttons
+            self.assertIn('onclick="exportComparisonData(\'csv\')"', content)
+            self.assertIn('onclick="exportComparisonData(\'json\')"', content)
+            self.assertIn('onclick="exportComparisonData(\'excel\')"', content)
+
+    def test_export_directory_creation(self):
+        """Test that export directory is created correctly."""
+        output_dir = 'test_reports_export'
+        visualizer = PerformanceVisualizer(output_dir=output_dir)
+        
+        # Verify directories were created
+        self.assertTrue(os.path.exists(output_dir))
+        self.assertTrue(os.path.exists(os.path.join(output_dir, 'data')))
+        self.assertTrue(os.path.exists(os.path.join(output_dir, 'exports')))
+        
+        # Clean up test directory
+        import shutil
+        shutil.rmtree(output_dir)
+
 if __name__ == '__main__':
     unittest.main() 
