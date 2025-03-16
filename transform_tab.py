@@ -1,9 +1,8 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                            QGroupBox, QFormLayout, QDoubleSpinBox,
                            QRadioButton, QButtonGroup, QLabel,
-                           QHBoxLayout, QCheckBox, QGridLayout,
-                           QListWidget, QListWidgetItem)
-from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
+                           QHBoxLayout, QCheckBox, QGridLayout)
+from PyQt6.QtCore import Qt, pyqtSignal
 
 class TransformTab(QWidget):
     # Signals
@@ -16,9 +15,7 @@ class TransformTab(QWidget):
         super().__init__()
         self._current_mode = None
         self._active_axis = None
-        self._relative_mode = False  # Track relative/absolute mode
-        self._history = []  # Track transform history
-        self._history_index = -1  # Current position in history
+        self._relative_mode = False  # New: Track relative/absolute mode
         self.initUI()
         
     def initUI(self):
@@ -45,36 +42,6 @@ class TransformTab(QWidget):
             
         mode_group.setLayout(mode_layout)
         layout.addWidget(mode_group)
-        
-        # History panel
-        history_group = QGroupBox("Transform History")
-        history_layout = QVBoxLayout()
-        
-        # History list widget
-        self.history_list = QListWidget()
-        self.history_list.setMaximumHeight(150)
-        self.history_list.setAlternatingRowColors(True)
-        self.history_list.itemClicked.connect(self.onHistoryItemClicked)
-        history_layout.addWidget(self.history_list)
-        
-        # Undo/Redo buttons with tooltips
-        undo_redo_layout = QHBoxLayout()
-        
-        self.undo_button = QPushButton("Undo (Ctrl+Z)")
-        self.undo_button.setToolTip("Undo last transform")
-        self.undo_button.clicked.connect(self.undoTransform)
-        self.undo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.undo_button)
-        
-        self.redo_button = QPushButton("Redo (Ctrl+Y)")
-        self.redo_button.setToolTip("Redo last undone transform")
-        self.redo_button.clicked.connect(self.redoTransform)
-        self.redo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.redo_button)
-        
-        history_layout.addLayout(undo_redo_layout)
-        history_group.setLayout(history_layout)
-        layout.addWidget(history_group)
         
         # Axis selection
         axis_group = QGroupBox("Axis")
@@ -168,6 +135,23 @@ class TransformTab(QWidget):
         # Emit initial settings
         self.onSnapSettingsChanged()
         
+    def setActiveAxis(self, axis):
+        """Set the active axis."""
+        for button in self.axis_group.buttons():
+            if button.text().split()[0].lower() == axis:
+                button.setChecked(True)
+                self.onAxisChanged(axis)
+                break
+                
+    def onAxisChanged(self, axis):
+        """Handle axis selection change."""
+        self._active_axis = axis
+        self.axis_changed.emit(axis)
+        
+    def toggleSnapping(self):
+        """Toggle snapping on/off."""
+        self.snap_enabled.setChecked(not self.snap_enabled.isChecked())
+        
     def onRelativeModeChanged(self, state):
         """Handle relative mode toggle."""
         self._relative_mode = bool(state)
@@ -192,110 +176,49 @@ class TransformTab(QWidget):
         }
         
     def onModeChanged(self, mode):
-        """Handle transform mode change"""
-        if self._current_mode != mode:
-            self._current_mode = mode
-            self.transform_mode_changed.emit(self.getTransformMode())
-            
-    def onAxisChanged(self, axis):
-        """Handle axis selection change"""
-        if self._active_axis != axis:
-            self._active_axis = axis
-            self.axis_changed.emit(axis)
-            
+        """Handle transform mode change."""
+        self._current_mode = mode
+        self.transform_mode_changed.emit(mode)
+        
     def onSnapSettingsChanged(self):
-        """Handle snap settings change"""
-        self.snap_settings_changed.emit(self.getSnapSettings())
+        """Emit signal when snapping settings change."""
+        settings = self.getSnapSettings()
+        self.snap_settings_changed.emit(settings)
         
-    def addToHistory(self, transform_type, parameters):
-        """Add a transform operation to the history."""
-        # Remove any redo history if we're not at the end
-        while len(self._history) > self._history_index + 1:
-            self._history.pop()
-            
-        # Add new transform to history
-        transform_info = {
-            'type': transform_type,
-            'params': parameters.copy(),
-            'timestamp': QDateTime.currentDateTime()
-        }
-        self._history.append(transform_info)
-        self._history_index += 1
+    def setCurrentMode(self, mode):
+        """Set the current transform mode."""
+        for button in self.mode_group.buttons():
+            if button.text().split()[0].lower() == mode:
+                button.setChecked(True)
+                self.onModeChanged(mode)
+                break
         
-        # Update history list
-        self.updateHistoryList()
+    def setupTranslateParams(self):
+        self.clearParams()
+        self.addParameter("Distance", 0.0, -1000.0, 1000.0, 0.1)
         
-        # Enable/disable undo/redo buttons
-        self.updateUndoRedoState()
+    def setupRotateParams(self):
+        self.clearParams()
+        self.addParameter("Angle (degrees)", 0.0, -360.0, 360.0, 1.0)
         
-    def updateHistoryList(self):
-        """Update the history list widget."""
-        self.history_list.clear()
-        for i, transform in enumerate(self._history):
-            timestamp = transform['timestamp'].toString('hh:mm:ss')
-            mode = transform['params']['mode']
-            axis = transform['params']['axis']
-            value = transform['params'].get('value', 0)
-            
-            item_text = f"{timestamp} - {mode.capitalize()} {axis.upper()}: {value:.2f}"
-            item = QListWidgetItem(item_text)
-            
-            # Highlight current position in history
-            if i == self._history_index:
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
+    def setupScaleParams(self):
+        self.clearParams()
+        self.addParameter("Scale Factor", 1.0, 0.01, 100.0, 0.1)
+        
+    def clearParams(self):
+        while self.params_layout.count():
+            child = self.params_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
                 
-            self.history_list.addItem(item)
-            
-        # Scroll to current position
-        if self._history_index >= 0:
-            self.history_list.scrollToItem(
-                self.history_list.item(self._history_index)
-            )
-            
-    def updateUndoRedoState(self):
-        """Update the enabled state of undo/redo buttons."""
-        self.undo_button.setEnabled(self._history_index >= 0)
-        self.redo_button.setEnabled(self._history_index < len(self._history) - 1)
+    def addParameter(self, name, default_value, min_val, max_val, step):
+        spin_box = QDoubleSpinBox()
+        spin_box.setRange(min_val, max_val)
+        spin_box.setValue(default_value)
+        spin_box.setSingleStep(step)
+        self.params_layout.addRow(name, spin_box)
         
-    def undoTransform(self):
-        """Undo the last transform operation."""
-        if self._history_index >= 0:
-            self._history_index -= 1
-            self.updateHistoryList()
-            self.updateUndoRedoState()
-            # Emit signal to main window
-            self.transform_applied.emit("undo", {})
-            
-    def redoTransform(self):
-        """Redo the last undone transform operation."""
-        if self._history_index < len(self._history) - 1:
-            self._history_index += 1
-            transform = self._history[self._history_index]
-            self.updateHistoryList()
-            self.updateUndoRedoState()
-            # Emit signal to main window
-            self.transform_applied.emit("redo", transform['params'])
-            
-    def onHistoryItemClicked(self, item):
-        """Handle clicking on a history item."""
-        index = self.history_list.row(item)
-        if index == self._history_index:
-            return
-            
-        # Determine if we're undoing or redoing
-        if index < self._history_index:
-            # Undo operations until we reach the clicked index
-            while self._history_index > index:
-                self.undoTransform()
-        else:
-            # Redo operations until we reach the clicked index
-            while self._history_index < index:
-                self.redoTransform()
-                
     def applyTransform(self):
-        """Apply the current transform with parameters"""
         # Collect parameters
         params = {}
         
@@ -308,7 +231,7 @@ class TransformTab(QWidget):
         # Get the selected axis
         for button in self.axis_group.buttons():
             if button.isChecked():
-                params["axis"] = button.text().lower()
+                params["axis"] = button.text().split()[0].lower()
                 break
         
         # Get the parameter value
@@ -320,61 +243,30 @@ class TransformTab(QWidget):
                 break
         
         # Add snapping settings
-        params["snap"] = self.getSnapSettings()
+        params["snap"] = {
+            'enabled': self.snap_enabled.isChecked(),
+            'translate': self.snap_translate.value(),
+            'rotate': self.snap_rotate.value(),
+            'scale': self.snap_scale.value()
+        }
                 
-        # Add transform to history
-        self.addToHistory(params["mode"], params)
-        
         # Emit signal with transform parameters
         self.transform_applied.emit(params["mode"], params)
         
-    def updateTransformValues(self, transform):
-        """Update the UI with current transform values"""
-        # Get the current parameter spin box
-        for i in range(self.params_layout.rowCount()):
-            spin_box = self.params_layout.itemAt(i * 2 + 1).widget()
-            if isinstance(spin_box, QDoubleSpinBox):
-                # Update value based on transform mode
-                current_mode = None
-                for button in self.mode_group.buttons():
-                    if button.isChecked():
-                        current_mode = button.text().split()[0].lower()
-                        break
-                
-                if current_mode == "translate":
-                    # Show position for current axis
-                    for button in self.axis_group.buttons():
-                        if button.isChecked():
-                            axis = button.text().lower()
-                            if axis == 'x':
-                                spin_box.setValue(transform.position[0])
-                            elif axis == 'y':
-                                spin_box.setValue(transform.position[1])
-                            else:  # z
-                                spin_box.setValue(transform.position[2])
-                            break
-                elif current_mode == "rotate":
-                    # Show rotation for current axis
-                    for button in self.axis_group.buttons():
-                        if button.isChecked():
-                            axis = button.text().lower()
-                            if axis == 'x':
-                                spin_box.setValue(transform.rotation[0])
-                            elif axis == 'y':
-                                spin_box.setValue(transform.rotation[1])
-                            else:  # z
-                                spin_box.setValue(transform.rotation[2])
-                            break
-                elif current_mode == "scale":
-                    # Show scale for current axis
-                    for button in self.axis_group.buttons():
-                        if button.isChecked():
-                            axis = button.text().lower()
-                            if axis == 'x':
-                                spin_box.setValue(transform.scale[0])
-                            elif axis == 'y':
-                                spin_box.setValue(transform.scale[1])
-                            else:  # z
-                                spin_box.setValue(transform.scale[2])
-                            break
-                break 
+    def getCurrentMode(self):
+        """Get the current transform mode."""
+        for button in self.mode_group.buttons():
+            if button.isChecked():
+                return button.text().split()[0].lower()
+        return None
+
+    def getCurrentAxis(self):
+        """Get the current active axis."""
+        for button in self.axis_group.buttons():
+            if button.isChecked():
+                return button.text().split()[0].lower()
+        return None
+
+    def getCurrentSnapSettings(self):
+        """Get the current snapping settings."""
+        return self.getSnapSettings() 
