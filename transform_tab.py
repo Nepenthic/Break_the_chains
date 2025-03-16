@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                            QGroupBox, QFormLayout, QDoubleSpinBox,
                            QRadioButton, QButtonGroup, QLabel,
                            QHBoxLayout, QCheckBox, QGridLayout,
-                           QListWidget, QListWidgetItem, QMenu)
+                           QListWidget, QListWidgetItem)
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
 
 class TransformTab(QWidget):
@@ -16,10 +16,9 @@ class TransformTab(QWidget):
         super().__init__()
         self._current_mode = None
         self._active_axis = None
-        self._relative_mode = False  # New: Track relative/absolute mode
+        self._relative_mode = False  # Track relative/absolute mode
         self._history = []  # Track transform history
         self._history_index = -1  # Current position in history
-        self._grouped_history = []  # Track grouped transforms
         self.initUI()
         
     def initUI(self):
@@ -47,26 +46,36 @@ class TransformTab(QWidget):
         mode_group.setLayout(mode_layout)
         layout.addWidget(mode_group)
         
-        # Axis selection
-        axis_group = QGroupBox("Axis")
-        axis_layout = QHBoxLayout()
+        # History panel
+        history_group = QGroupBox("Transform History")
+        history_layout = QVBoxLayout()
         
-        self.axis_group = QButtonGroup()
-        axes = [
-            ("X (Alt+X)", "x", "Transform along X axis (Alt+X)"),
-            ("Y (Alt+Y)", "y", "Transform along Y axis (Alt+Y)"),
-            ("Z (Alt+Z)", "z", "Transform along Z axis (Alt+Z)")
-        ]
+        # History list widget
+        self.history_list = QListWidget()
+        self.history_list.setMaximumHeight(150)
+        self.history_list.setAlternatingRowColors(True)
+        self.history_list.itemClicked.connect(self.onHistoryItemClicked)
+        self.history_list.setToolTip("Click to jump to a specific transform state")
+        history_layout.addWidget(self.history_list)
         
-        for text, axis, tooltip in axes:
-            radio = QRadioButton(text)
-            radio.setToolTip(tooltip)
-            self.axis_group.addButton(radio)
-            axis_layout.addWidget(radio)
-            radio.clicked.connect(lambda checked, a=axis: self.onAxisChanged(a))
-            
-        axis_group.setLayout(axis_layout)
-        layout.addWidget(axis_group)
+        # Undo/Redo buttons with tooltips
+        undo_redo_layout = QHBoxLayout()
+        
+        self.undo_button = QPushButton("Undo (Ctrl+Z)")
+        self.undo_button.setToolTip("Undo last transform")
+        self.undo_button.clicked.connect(self.undoTransform)
+        self.undo_button.setEnabled(False)
+        undo_redo_layout.addWidget(self.undo_button)
+        
+        self.redo_button = QPushButton("Redo (Ctrl+Y)")
+        self.redo_button.setToolTip("Redo last undone transform")
+        self.redo_button.clicked.connect(self.redoTransform)
+        self.redo_button.setEnabled(False)
+        undo_redo_layout.addWidget(self.redo_button)
+        
+        history_layout.addLayout(undo_redo_layout)
+        history_group.setLayout(history_layout)
+        layout.addWidget(history_group)
         
         # Transform mode options
         options_group = QGroupBox("Options")
@@ -122,46 +131,6 @@ class TransformTab(QWidget):
         
         snap_group.setLayout(snap_layout)
         layout.addWidget(snap_group)
-        
-        # History panel
-        history_group = QGroupBox("Transform History")
-        history_layout = QVBoxLayout()
-        
-        # History list widget
-        self.history_list = QListWidget()
-        self.history_list.setMaximumHeight(150)
-        self.history_list.setAlternatingRowColors(True)
-        self.history_list.itemDoubleClicked.connect(self.onHistoryItemDoubleClicked)
-        self.history_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.history_list.customContextMenuRequested.connect(self.showHistoryContextMenu)
-        self.history_list.setToolTip("Double-click to restore a transform state\nRight-click for more options")
-        history_layout.addWidget(self.history_list)
-        
-        # Undo/Redo buttons with tooltips
-        undo_redo_layout = QHBoxLayout()
-        
-        self.undo_button = QPushButton("Undo (Ctrl+Z)")
-        self.undo_button.setToolTip("Undo last transform")
-        self.undo_button.clicked.connect(self.undoTransform)
-        self.undo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.undo_button)
-        
-        self.redo_button = QPushButton("Redo (Ctrl+Y)")
-        self.redo_button.setToolTip("Redo last undone transform")
-        self.redo_button.clicked.connect(self.redoTransform)
-        self.redo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.redo_button)
-        
-        # Group transforms button
-        self.group_button = QPushButton("Group Selected")
-        self.group_button.setToolTip("Group selected transforms together")
-        self.group_button.clicked.connect(self.groupSelectedTransforms)
-        self.group_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.group_button)
-        
-        history_layout.addLayout(undo_redo_layout)
-        history_group.setLayout(history_layout)
-        layout.addWidget(history_group)
         
         # Apply button with tooltip
         apply_button = QPushButton("Apply Transform (Enter)")
@@ -325,8 +294,7 @@ class TransformTab(QWidget):
         transform_info = {
             'type': transform_type,
             'params': parameters.copy(),
-            'timestamp': QDateTime.currentDateTime(),
-            'group_id': None  # For transform grouping
+            'timestamp': QDateTime.currentDateTime()
         }
         self._history.append(transform_info)
         self._history_index += 1
@@ -340,9 +308,6 @@ class TransformTab(QWidget):
     def updateHistoryList(self):
         """Update the history list widget."""
         self.history_list.clear()
-        current_group = None
-        group_items = []
-        
         for i, transform in enumerate(self._history):
             timestamp = transform['timestamp'].toString('hh:mm:ss')
             mode = transform['params']['mode']
@@ -350,33 +315,16 @@ class TransformTab(QWidget):
             value = transform['params'].get('value', 0)
             relative = "Relative" if transform['params'].get('relative_mode', False) else "Absolute"
             
-            if transform['group_id'] != current_group:
-                # If we have a previous group, add it
-                if group_items:
-                    self.addGroupToList(group_items)
-                    group_items = []
-                current_group = transform['group_id']
-            
             item_text = f"{timestamp} - {mode.capitalize()} {axis.upper()}: {value:.2f} ({relative})"
             item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, i)  # Store history index
             
-            if transform['group_id'] is not None:
-                group_items.append(item)
-            else:
-                # Highlight current position in history
-                if i == self._history_index:
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                self.history_list.addItem(item)
-        
-        # Add any remaining group
-        if group_items:
-            self.addGroupToList(group_items)
-            
-        # Update group button state
-        self.group_button.setEnabled(len(self.history_list.selectedItems()) > 1)
+            # Highlight current position in history
+            if i == self._history_index:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                
+            self.history_list.addItem(item)
             
         # Scroll to current position
         if self._history_index >= 0:
@@ -384,56 +332,33 @@ class TransformTab(QWidget):
                 self.history_list.item(self._history_index)
             )
             
-    def addGroupToList(self, items):
-        """Add a group of items to the history list."""
-        if not items:
-            return
+    def updateUndoRedoState(self):
+        """Update the enabled state of undo/redo buttons."""
+        self.undo_button.setEnabled(self._history_index >= 0)
+        self.redo_button.setEnabled(self._history_index < len(self._history) - 1)
+        
+    def undoTransform(self):
+        """Undo the last transform operation."""
+        if self._history_index >= 0:
+            self._history_index -= 1
+            self.updateHistoryList()
+            self.updateUndoRedoState()
+            # Emit signal to main window
+            self.transform_applied.emit("undo", {})
             
-        # Create group item
-        first = items[0]
-        last = items[-1]
-        group_text = f"Group: {len(items)} transforms"
-        group_item = QListWidgetItem(group_text)
-        group_item.setData(Qt.ItemDataRole.UserRole, [item.data(Qt.ItemDataRole.UserRole) for item in items])
-        
-        # Style group item
-        font = group_item.font()
-        font.setBold(True)
-        group_item.setFont(font)
-        group_item.setBackground(Qt.GlobalColor.lightGray)
-        
-        self.history_list.addItem(group_item)
-        
-    def showHistoryContextMenu(self, position):
-        """Show context menu for history items."""
-        menu = QMenu()
-        
-        # Get item at position
-        item = self.history_list.itemAt(position)
-        if not item:
-            return
+    def redoTransform(self):
+        """Redo the last undone transform operation."""
+        if self._history_index < len(self._history) - 1:
+            self._history_index += 1
+            transform = self._history[self._history_index]
+            self.updateHistoryList()
+            self.updateUndoRedoState()
+            # Emit signal to main window
+            self.transform_applied.emit("redo", transform['params'])
             
-        # Add menu actions
-        restore_action = menu.addAction("Restore This State")
-        restore_action.triggered.connect(lambda: self.onHistoryItemDoubleClicked(item))
-        
-        if len(self.history_list.selectedItems()) > 1:
-            group_action = menu.addAction("Group Selected")
-            group_action.triggered.connect(self.groupSelectedTransforms)
-            
-        if isinstance(item.data(Qt.ItemDataRole.UserRole), list):
-            ungroup_action = menu.addAction("Ungroup")
-            ungroup_action.triggered.connect(lambda: self.ungroupTransforms(item))
-            
-        menu.exec(self.history_list.mapToGlobal(position))
-        
-    def onHistoryItemDoubleClicked(self, item):
-        """Handle double-clicking on a history item."""
-        index = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(index, list):
-            # Group item - restore to last transform in group
-            index = index[-1]
-            
+    def onHistoryItemClicked(self, item):
+        """Handle clicking on a history item."""
+        index = self.history_list.row(item)
         if index == self._history_index:
             return
             
@@ -445,54 +370,4 @@ class TransformTab(QWidget):
         else:
             # Redo operations until we reach the clicked index
             while self._history_index < index:
-                self.redoTransform()
-                
-    def groupSelectedTransforms(self):
-        """Group selected transforms together."""
-        selected_items = self.history_list.selectedItems()
-        if len(selected_items) < 2:
-            return
-            
-        # Generate new group ID
-        group_id = len(self._grouped_history)
-        self._grouped_history.append([])
-        
-        # Update group IDs in history
-        for item in selected_items:
-            index = item.data(Qt.ItemDataRole.UserRole)
-            if isinstance(index, int):
-                self._history[index]['group_id'] = group_id
-                self._grouped_history[group_id].append(index)
-                
-        self.updateHistoryList()
-        
-    def ungroupTransforms(self, group_item):
-        """Ungroup a set of transforms."""
-        indices = group_item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(indices, list):
-            return
-            
-        # Remove group IDs
-        for index in indices:
-            self._history[index]['group_id'] = None
-            
-        self.updateHistoryList()
-
-    def updateUndoRedoState(self):
-        """Update the state of the undo/redo buttons."""
-        self.undo_button.setEnabled(self._history_index > 0)
-        self.redo_button.setEnabled(self._history_index < len(self._history) - 1)
-
-    def undoTransform(self):
-        """Undo the last transform."""
-        if self._history_index > 0:
-            self._history_index -= 1
-            self.updateHistoryList()
-            self.updateUndoRedoState()
-
-    def redoTransform(self):
-        """Redo the last undone transform."""
-        if self._history_index < len(self._history) - 1:
-            self._history_index += 1
-            self.updateHistoryList()
-            self.updateUndoRedoState() 
+                self.redoTransform() 
