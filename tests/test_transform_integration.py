@@ -1539,5 +1539,149 @@ class TestTransformIntegration(unittest.TestCase):
             self.assertIn('showProgress(false)', content)
             self.assertIn('updateProgress(0)', content)
 
+    def test_validation_empty_arrays(self):
+        """Test validation of empty arrays."""
+        visualizer = PerformanceVisualizer()
+        
+        # Test empty shape_counts
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([], [1.0, 2.0])
+        self.assertIn("Empty arrays provided", str(context.exception))
+        
+        # Test empty durations
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, 2], [])
+        self.assertIn("Empty arrays provided", str(context.exception))
+    
+    def test_validation_array_length_mismatch(self):
+        """Test validation of mismatched array lengths."""
+        visualizer = PerformanceVisualizer()
+        
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, 2, 3], [1.0, 2.0])
+        self.assertIn("Array length mismatch", str(context.exception))
+    
+    def test_validation_non_numeric_values(self):
+        """Test validation of non-numeric values."""
+        visualizer = PerformanceVisualizer()
+        
+        # Test non-numeric shape counts
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, "two", 3], [1.0, 2.0, 3.0])
+        self.assertIn("Non-numeric value found in shape_counts", str(context.exception))
+        
+        # Test non-numeric durations
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, 2, 3], [1.0, "slow", 3.0])
+        self.assertIn("Non-numeric value found in durations", str(context.exception))
+    
+    def test_validation_negative_values(self):
+        """Test validation of negative values."""
+        visualizer = PerformanceVisualizer()
+        
+        # Test negative shape counts
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, -2, 3], [1.0, 2.0, 3.0])
+        self.assertIn("Negative shape count found", str(context.exception))
+        
+        # Test negative durations
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, 2, 3], [1.0, -2.0, 3.0])
+        self.assertIn("Negative duration found", str(context.exception))
+    
+    def test_validation_invalid_numbers(self):
+        """Test validation of NaN and Inf values."""
+        visualizer = PerformanceVisualizer()
+        
+        # Test NaN values
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, float('nan'), 3], [1.0, 2.0, 3.0])
+        self.assertIn("Invalid shape count (NaN/Inf)", str(context.exception))
+        
+        # Test Inf values
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations([1, 2, 3], [1.0, float('inf'), 3.0])
+        self.assertIn("Invalid duration (NaN/Inf)", str(context.exception))
+    
+    def test_validation_comparison_data(self):
+        """Test validation of comparison data."""
+        visualizer = PerformanceVisualizer()
+        
+        current_data = {
+            'shape_counts': [1, 2, 3],
+            'durations': [1.0, 2.0, 3.0]
+        }
+        
+        # Test missing keys in comparison data
+        invalid_comparison = {
+            'shape_counts': [1, 2, 3]
+            # Missing 'durations' key
+        }
+        
+        with self.assertRaises(ValueError) as context:
+            visualizer.plot_transform_durations(
+                current_data['shape_counts'],
+                current_data['durations'],
+                comparison_data=invalid_comparison
+            )
+        self.assertIn("Missing required key", str(context.exception))
+        
+        # Test mismatched data sizes
+        mismatched_comparison = {
+            'shape_counts': [1, 2],
+            'durations': [1.0, 2.0]
+        }
+        
+        # This should not raise an error but should log a warning
+        with self.assertLogs(level='WARNING') as log:
+            visualizer.plot_transform_durations(
+                current_data['shape_counts'],
+                current_data['durations'],
+                comparison_data=mismatched_comparison
+            )
+        self.assertTrue(any("Dataset size mismatch" in record.message for record in log.records))
+    
+    def test_validation_summary(self):
+        """Test validation summary statistics."""
+        visualizer = PerformanceVisualizer()
+        
+        # Generate some validation errors
+        try:
+            visualizer.plot_transform_durations([], [])
+        except ValueError:
+            pass
+        
+        try:
+            visualizer.plot_transform_durations([1, 2], [1.0])
+        except ValueError:
+            pass
+        
+        # Check validation summary
+        summary = visualizer.get_validation_summary()
+        
+        self.assertEqual(summary['total_validations'], 2)
+        self.assertEqual(summary['failed_validations'], 2)
+        self.assertEqual(summary['error_rate'], 1.0)
+        self.assertTrue(len(summary['recent_errors']) > 0)
+    
+    def test_validation_message_formatting(self):
+        """Test formatting of validation messages in HTML output."""
+        visualizer = PerformanceVisualizer()
+        
+        # Generate a plot with some warnings
+        shape_counts = list(range(1001))  # Will trigger large dataset warning
+        durations = [float(i) for i in range(1001)]
+        
+        output_file = visualizer.plot_transform_durations(shape_counts, durations)
+        
+        # Read the generated HTML file
+        with open(output_file, 'r') as f:
+            html_content = f.read()
+        
+        # Check for validation message elements
+        self.assertIn('class="validation-warnings"', html_content)
+        self.assertIn('Large dataset detected', html_content)
+        self.assertIn('window.validationSummary', html_content)
+
 if __name__ == '__main__':
     unittest.main() 

@@ -5,6 +5,8 @@ import numpy as np
 from datetime import datetime
 import os
 import json
+import logging
+from typing import List, Dict, Union, Optional
 
 class PerformanceVisualizer:
     """Generates interactive visualizations for performance test results."""
@@ -20,6 +22,143 @@ class PerformanceVisualizer:
         
         # Set default Plotly template
         pio.templates.default = "plotly_white"
+        
+        # Configure logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
+        
+        # Initialize validation stats
+        self.validation_stats = {
+            'total_validations': 0,
+            'failed_validations': 0,
+            'validation_errors': []
+        }
+    
+    def _validate_data(self, shape_counts: List[int], durations: List[float], 
+                      test_type: str = 'batch') -> Dict[str, List[str]]:
+        """Validate input data for visualization."""
+        errors = []
+        warnings = []
+        
+        # Check for empty arrays
+        if not shape_counts or not durations:
+            errors.append("Empty arrays provided for shape_counts or durations")
+            return {'errors': errors, 'warnings': warnings}
+        
+        # Check array lengths match
+        if len(shape_counts) != len(durations):
+            errors.append(f"Array length mismatch: shape_counts ({len(shape_counts)}) != durations ({len(durations)})")
+            return {'errors': errors, 'warnings': warnings}
+        
+        # Validate numeric values
+        for i, (count, duration) in enumerate(zip(shape_counts, durations)):
+            # Check for non-numeric values
+            if not isinstance(count, (int, float)):
+                errors.append(f"Non-numeric value found in shape_counts at index {i}: {count}")
+            if not isinstance(duration, (int, float)):
+                errors.append(f"Non-numeric value found in durations at index {i}: {duration}")
+            
+            # Check for negative values
+            if isinstance(count, (int, float)) and count < 0:
+                errors.append(f"Negative shape count found at index {i}: {count}")
+            if isinstance(duration, (int, float)) and duration < 0:
+                errors.append(f"Negative duration found at index {i}: {duration}")
+            
+            # Check for NaN or Inf values
+            if isinstance(count, float) and (np.isnan(count) or np.isinf(count)):
+                errors.append(f"Invalid shape count (NaN/Inf) found at index {i}")
+            if isinstance(duration, float) and (np.isnan(duration) or np.isinf(duration)):
+                errors.append(f"Invalid duration (NaN/Inf) found at index {i}")
+        
+        # Performance warnings
+        if len(shape_counts) > 1000:
+            warnings.append(f"Large dataset detected ({len(shape_counts)} points). This may impact visualization performance.")
+        
+        # Update validation stats
+        self.validation_stats['total_validations'] += 1
+        if errors:
+            self.validation_stats['failed_validations'] += 1
+            self.validation_stats['validation_errors'].extend(errors)
+        
+        return {'errors': errors, 'warnings': warnings}
+    
+    def _validate_comparison_data(self, current_data: Dict, comparison_data: Dict) -> Dict[str, List[str]]:
+        """Validate comparison data for visualization."""
+        errors = []
+        warnings = []
+        
+        required_keys = ['shape_counts', 'durations']
+        
+        # Check for required keys
+        for key in required_keys:
+            if key not in current_data:
+                errors.append(f"Missing required key '{key}' in current data")
+            if key not in comparison_data:
+                errors.append(f"Missing required key '{key}' in comparison data")
+        
+        if errors:
+            return {'errors': errors, 'warnings': warnings}
+        
+        # Validate data types and lengths
+        current_counts = current_data['shape_counts']
+        current_durations = current_data['durations']
+        comp_counts = comparison_data['shape_counts']
+        comp_durations = comparison_data['durations']
+        
+        # Validate each dataset
+        current_validation = self._validate_data(current_counts, current_durations)
+        comp_validation = self._validate_data(comp_counts, comp_durations)
+        
+        errors.extend(current_validation['errors'])
+        errors.extend(comp_validation['errors'])
+        warnings.extend(current_validation['warnings'])
+        warnings.extend(comp_validation['warnings'])
+        
+        # Compare datasets
+        if len(current_counts) != len(comp_counts):
+            warnings.append(f"Dataset size mismatch: current ({len(current_counts)}) vs comparison ({len(comp_counts)})")
+        
+        # Check for significant differences
+        if not errors and len(current_counts) == len(comp_counts):
+            count_diffs = np.array(current_counts) - np.array(comp_counts)
+            duration_diffs = np.array(current_durations) - np.array(comp_durations)
+            
+            if np.any(np.abs(count_diffs) > 0):
+                warnings.append("Shape count differences detected between current and comparison data")
+            if np.any(np.abs(duration_diffs) > 1000):  # 1000ms threshold
+                warnings.append("Significant duration differences detected (>1000ms)")
+        
+        return {'errors': errors, 'warnings': warnings}
+    
+    def get_validation_summary(self) -> Dict[str, Union[int, List[str]]]:
+        """Get summary of validation statistics."""
+        return {
+            'total_validations': self.validation_stats['total_validations'],
+            'failed_validations': self.validation_stats['failed_validations'],
+            'error_rate': (self.validation_stats['failed_validations'] / 
+                         max(1, self.validation_stats['total_validations'])),
+            'recent_errors': self.validation_stats['validation_errors'][-10:]  # Last 10 errors
+        }
+    
+    def _format_validation_messages(self, validation_results: Dict[str, List[str]]) -> str:
+        """Format validation messages for display."""
+        messages = []
+        
+        if validation_results['errors']:
+            messages.append("<div class='validation-errors'>")
+            messages.append("<h3>Validation Errors:</h3>")
+            messages.extend([f"<p class='error-message'>{error}</p>" 
+                           for error in validation_results['errors']])
+            messages.append("</div>")
+        
+        if validation_results['warnings']:
+            messages.append("<div class='validation-warnings'>")
+            messages.append("<h3>Validation Warnings:</h3>")
+            messages.extend([f"<p class='warning-message'>{warning}</p>" 
+                           for warning in validation_results['warnings']])
+            messages.append("</div>")
+        
+        return "\n".join(messages)
     
     def save_test_data(self, test_data, run_id=None):
         """Save test data for future comparisons."""
@@ -50,103 +189,205 @@ class PerformanceVisualizer:
     def plot_transform_durations(self, shape_counts, durations, test_type='batch', 
                                comparison_data=None, filters=None):
         """Generate interactive line plot of transform durations vs shape count."""
+        # Validate input data
+        validation_results = self._validate_data(shape_counts, durations, test_type)
+        
+        if validation_results['errors']:
+            self.logger.error("Validation errors encountered:")
+            for error in validation_results['errors']:
+                self.logger.error(error)
+            raise ValueError("Invalid input data. Check logs for details.")
+        
+        if validation_results['warnings']:
+            for warning in validation_results['warnings']:
+                self.logger.warning(warning)
+        
+        # Validate comparison data if provided
+        if comparison_data:
+            comp_validation = self._validate_comparison_data(
+                {'shape_counts': shape_counts, 'durations': durations},
+                comparison_data
+            )
+            if comp_validation['errors']:
+                self.logger.error("Comparison data validation errors:")
+                for error in comp_validation['errors']:
+                    self.logger.error(error)
+                raise ValueError("Invalid comparison data. Check logs for details.")
+            
+            if comp_validation['warnings']:
+                for warning in comp_validation['warnings']:
+                    self.logger.warning(warning)
+        
         # Apply filters if provided
         if filters:
-            filtered_indices = self._apply_filters(shape_counts, filters)
-            shape_counts = [shape_counts[i] for i in filtered_indices]
-            durations = [durations[i] for i in filtered_indices]
+            try:
+                filtered_indices = self._apply_filters(shape_counts, filters)
+                shape_counts = [shape_counts[i] for i in filtered_indices]
+                durations = [durations[i] for i in filtered_indices]
+                
+                if not shape_counts:
+                    raise ValueError("No data points remain after applying filters")
+            except Exception as e:
+                self.logger.error(f"Error applying filters: {str(e)}")
+                raise
         
         # Create figure based on comparison mode
-        if comparison_data:
-            fig = make_subplots(rows=1, cols=2, 
-                              subplot_titles=("Current Run", "Comparison Run"),
-                              horizontal_spacing=0.1)
+        try:
+            if comparison_data:
+                fig = make_subplots(rows=1, cols=2, 
+                                  subplot_titles=("Current Run", "Comparison Run"),
+                                  horizontal_spacing=0.1)
+                
+                # Current run
+                self._add_duration_traces(fig, shape_counts, durations, row=1, col=1)
+                
+                # Comparison run
+                comp_shape_counts = comparison_data['shape_counts']
+                comp_durations = comparison_data['durations']
+                if filters:
+                    filtered_indices = self._apply_filters(comp_shape_counts, filters)
+                    comp_shape_counts = [comp_shape_counts[i] for i in filtered_indices]
+                    comp_durations = [comp_durations[i] for i in filtered_indices]
+                self._add_duration_traces(fig, comp_shape_counts, comp_durations, row=1, col=2)
+                
+                fig.update_layout(height=600)
+            else:
+                fig = go.Figure()
+                self._add_duration_traces(fig, shape_counts, durations)
             
-            # Current run
-            self._add_duration_traces(fig, shape_counts, durations, row=1, col=1)
+            # Update layout
+            fig.update_layout(
+                title=dict(
+                    text=f'{test_type.title()} Transform Duration vs Shape Count',
+                    x=0.5,
+                    font=dict(size=20)
+                ),
+                showlegend=True,
+                legend=dict(
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="right",
+                    x=0.99
+                ),
+                margin=dict(t=100, l=80, r=80, b=80)
+            )
             
-            # Comparison run
-            comp_shape_counts = comparison_data['shape_counts']
-            comp_durations = comparison_data['durations']
-            if filters:
-                filtered_indices = self._apply_filters(comp_shape_counts, filters)
-                comp_shape_counts = [comp_shape_counts[i] for i in filtered_indices]
-                comp_durations = [comp_durations[i] for i in filtered_indices]
-            self._add_duration_traces(fig, comp_shape_counts, comp_durations, row=1, col=2)
+            # Add range slider for time series exploration
+            fig.update_xaxes(rangeslider_visible=True)
             
-            fig.update_layout(height=600)
-        else:
-            fig = go.Figure()
-            self._add_duration_traces(fig, shape_counts, durations)
-        
-        # Update layout
-        fig.update_layout(
-            title=dict(
-                text=f'{test_type.title()} Transform Duration vs Shape Count',
-                x=0.5,
-                font=dict(size=20)
-            ),
-            showlegend=True,
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="right",
-                x=0.99
-            ),
-            margin=dict(t=100, l=80, r=80, b=80)
-        )
-        
-        # Add range slider for time series exploration
-        fig.update_xaxes(rangeslider_visible=True)
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'{self.output_dir}/transform_duration_{test_type}_{timestamp}.html'
-        
-        # Prepare data for JavaScript
-        if comparison_data:
-            js_data = f"""
-            <script>
-            window.currentData = {{
-                shape_counts: {json.dumps(shape_counts)},
-                durations: {json.dumps(durations)}
-            }};
-            window.comparisonData = {{
-                current: {{
+            # Add validation messages to the plot
+            validation_html = self._format_validation_messages({
+                'errors': validation_results['errors'],
+                'warnings': validation_results['warnings']
+            })
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'{self.output_dir}/transform_duration_{test_type}_{timestamp}.html'
+            
+            # Prepare data for JavaScript
+            if comparison_data:
+                js_data = f"""
+                <script>
+                window.currentData = {{
                     shape_counts: {json.dumps(shape_counts)},
                     durations: {json.dumps(durations)}
-                }},
-                comparison: {{
-                    shape_counts: {json.dumps(comp_shape_counts)},
-                    durations: {json.dumps(comp_durations)}
+                }};
+                window.comparisonData = {{
+                    current: {{
+                        shape_counts: {json.dumps(shape_counts)},
+                        durations: {json.dumps(durations)}
+                    }},
+                    comparison: {{
+                        shape_counts: {json.dumps(comp_shape_counts)},
+                        durations: {json.dumps(comp_durations)}
+                    }}
+                }};
+                window.validationSummary = {json.dumps(self.get_validation_summary())};
+                </script>
+                
+                <style>
+                .validation-errors, .validation-warnings {{
+                    margin: 10px 0;
+                    padding: 10px;
+                    border-radius: 4px;
                 }}
-            }};
-            </script>
-            """
-        else:
-            js_data = f"""
-            <script>
-            window.currentData = {{
-                shape_counts: {json.dumps(shape_counts)},
-                durations: {json.dumps(durations)}
-            }};
-            window.comparisonData = null;
-            </script>
-            """
-        
-        # Add interactive controls and export functionality
-        fig.write_html(
-            filename,
-            include_plotlyjs='cdn',
-            full_html=True,
-            config={
-                'displayModeBar': True,
-                'responsive': True,
-                'modeBarButtonsToAdd': ['drawline', 'drawopenpath', 'eraseshape']
-            },
-            post_script=js_data
-        )
-        
-        return filename
+                .validation-errors {{
+                    background-color: #ffebee;
+                    border: 1px solid #ffcdd2;
+                }}
+                .validation-warnings {{
+                    background-color: #fff3e0;
+                    border: 1px solid #ffe0b2;
+                }}
+                .error-message {{
+                    color: #c62828;
+                    margin: 5px 0;
+                }}
+                .warning-message {{
+                    color: #ef6c00;
+                    margin: 5px 0;
+                }}
+                </style>
+                
+                {validation_html}
+                """
+            else:
+                js_data = f"""
+                <script>
+                window.currentData = {{
+                    shape_counts: {json.dumps(shape_counts)},
+                    durations: {json.dumps(durations)}
+                }};
+                window.comparisonData = null;
+                window.validationSummary = {json.dumps(self.get_validation_summary())};
+                </script>
+                
+                <style>
+                .validation-errors, .validation-warnings {{
+                    margin: 10px 0;
+                    padding: 10px;
+                    border-radius: 4px;
+                }}
+                .validation-errors {{
+                    background-color: #ffebee;
+                    border: 1px solid #ffcdd2;
+                }}
+                .validation-warnings {{
+                    background-color: #fff3e0;
+                    border: 1px solid #ffe0b2;
+                }}
+                .error-message {{
+                    color: #c62828;
+                    margin: 5px 0;
+                }}
+                .warning-message {{
+                    color: #ef6c00;
+                    margin: 5px 0;
+                }}
+                </style>
+                
+                {validation_html}
+                """
+            
+            # Add interactive controls and export functionality
+            fig.write_html(
+                filename,
+                include_plotlyjs='cdn',
+                full_html=True,
+                config={
+                    'displayModeBar': True,
+                    'responsive': True,
+                    'modeBarButtonsToAdd': ['drawline', 'drawopenpath', 'eraseshape']
+                },
+                post_script=js_data
+            )
+            
+            self.logger.info(f"Generated performance visualization: {filename}")
+            return filename
+            
+        except Exception as e:
+            self.logger.error(f"Error generating performance visualization: {str(e)}")
+            raise
     
     def _add_duration_traces(self, fig, shape_counts, durations, row=1, col=1):
         """Add duration and trend traces to the figure."""
