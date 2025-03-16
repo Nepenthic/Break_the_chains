@@ -962,5 +962,201 @@ class TestToolpathGeneration(unittest.TestCase):
                     # Check that interpolated point doesn't intersect island
                     self.assertFalse(check_point_in_polygon(point, island))
 
+    def test_helix_entry(self):
+        """Test helix entry moves in pocket machining."""
+        # Set up test parameters
+        self.generator.params.entry_type = "helix"
+        self.generator.params.helix_diameter = 0.8  # 80% of tool diameter
+        self.generator.params.helix_angle = 5.0  # 5 degrees
+        self.generator.params.start_z = 0.0
+        self.generator.params.pocket_depth = 10.0
+        self.generator.params.step_down = 5.0
+        
+        # Generate toolpath
+        toolpath = self.generator._generate_pocket_path()
+        
+        # Basic validation
+        self.assertIsNotNone(toolpath)
+        self.assertGreater(len(toolpath), 0)
+        
+        # Find helix entry moves
+        helix_entries = []
+        current_entry = []
+        
+        for i in range(len(toolpath) - 1):
+            p1 = toolpath[i]
+            p2 = toolpath[i + 1]
+            
+            # Check for start of helix (transition from clearance to cutting height)
+            if p1[2] == self.generator.clearance_height and p2[2] < self.generator.clearance_height:
+                current_entry = [p1, p2]
+            # Continue collecting helix points
+            elif len(current_entry) > 0 and p2[2] < self.generator.clearance_height:
+                current_entry.append(p2)
+                # Check if helix is complete (reached target Z)
+                if abs(p2[2] - (-5.0)) < 0.01 or abs(p2[2] - (-10.0)) < 0.01:
+                    helix_entries.append(current_entry)
+                    current_entry = []
+        
+        # Should have at least one helix entry
+        self.assertGreater(len(helix_entries), 0)
+        
+        # Validate each helix entry
+        for entry in helix_entries:
+            # Check number of points
+            self.assertGreater(len(entry), 16)  # At least 16 points per revolution
+            
+            # Check helix properties
+            tool_radius = self.generator.params.tool.diameter / 2.0
+            expected_radius = tool_radius * self.generator.params.helix_diameter / 2.0
+            
+            # Get helix center (first point XY)
+            center = entry[0][:2]
+            
+            # Check points form a helix
+            for i in range(1, len(entry)):
+                point = entry[i]
+                # Calculate radius from center
+                radius = np.linalg.norm(point[:2] - center)
+                self.assertAlmostEqual(radius, expected_radius, delta=0.1)
+                
+                if i > 1:
+                    # Check Z decreases monotonically
+                    self.assertLess(point[2], entry[i-1][2])
+                    
+                    # Check angle between consecutive points
+                    v1 = entry[i-1][:2] - center
+                    v2 = point[:2] - center
+                    angle = np.arccos(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+                    # Angle should be small for smooth helix
+                    self.assertLess(angle, np.pi/4)
+                    
+    def test_helix_with_islands(self):
+        """Test helix entry moves with islands present."""
+        # Create test boundary and island
+        boundary = [
+            np.array([0.0, 0.0]),
+            np.array([50.0, 0.0]),
+            np.array([50.0, 50.0]),
+            np.array([0.0, 50.0]),
+            np.array([0.0, 0.0])
+        ]
+        
+        island = [
+            np.array([20.0, 20.0]),
+            np.array([30.0, 20.0]),
+            np.array([30.0, 30.0]),
+            np.array([20.0, 30.0]),
+            np.array([20.0, 20.0])
+        ]
+        
+        # Set up test parameters
+        self.generator.params.islands = [island]
+        self.generator.params.entry_type = "helix"
+        self.generator.params.helix_diameter = 0.8
+        self.generator.params.helix_angle = 5.0
+        self.generator.params.start_z = 0.0
+        self.generator.params.pocket_depth = 10.0
+        self.generator.params.step_down = 5.0
+        
+        # Generate toolpath
+        toolpath = self.generator._generate_pocket_path()
+        
+        # Basic validation
+        self.assertIsNotNone(toolpath)
+        self.assertGreater(len(toolpath), 0)
+        
+        # Find helix entry points
+        helix_points = []
+        for i in range(len(toolpath) - 1):
+            p1 = toolpath[i]
+            p2 = toolpath[i + 1]
+            if p1[2] == self.generator.clearance_height and p2[2] < self.generator.clearance_height:
+                # Found start of helix
+                while i + 1 < len(toolpath) and toolpath[i + 1][2] < self.generator.clearance_height:
+                    helix_points.append(toolpath[i + 1][:2])
+                    i += 1
+                break
+        
+        # Check that helix points don't intersect with island
+        offset_island = offset_contour(
+            island,
+            self.generator.params.tool.diameter / 2.0,
+            OffsetDirection.OUTSIDE
+        )
+        
+        for point in helix_points:
+            # Point should be inside boundary
+            self.assertTrue(check_point_in_polygon(point, boundary))
+            # Point should be outside offset island
+            self.assertFalse(check_point_in_polygon(point, offset_island))
+            
+    def test_helix_parameters(self):
+        """Test different helix parameter combinations."""
+        test_params = [
+            # (diameter, angle, revolutions)
+            (0.6, 3.0, None),  # Smaller diameter, shallow angle
+            (1.0, 10.0, None),  # Larger diameter, steeper angle
+            (0.8, 5.0, 2.0),   # Fixed number of revolutions
+        ]
+        
+        for diameter, angle, revolutions in test_params:
+            # Set parameters
+            self.generator.params.entry_type = "helix"
+            self.generator.params.helix_diameter = diameter
+            self.generator.params.helix_angle = angle
+            self.generator.params.helix_revolutions = revolutions
+            self.generator.params.start_z = 0.0
+            self.generator.params.pocket_depth = 10.0
+            self.generator.params.step_down = 10.0  # Single pass for easier testing
+            
+            # Generate toolpath
+            toolpath = self.generator._generate_pocket_path()
+            
+            # Find helix points
+            helix_points = []
+            for i in range(len(toolpath) - 1):
+                p1 = toolpath[i]
+                p2 = toolpath[i + 1]
+                if p1[2] == self.generator.clearance_height and p2[2] < self.generator.clearance_height:
+                    while i + 1 < len(toolpath) and toolpath[i + 1][2] < self.generator.clearance_height:
+                        helix_points.append(toolpath[i + 1])
+                        i += 1
+                    break
+            
+            # Validate helix properties
+            tool_radius = self.generator.params.tool.diameter / 2.0
+            expected_radius = tool_radius * diameter / 2.0
+            
+            # Get helix center
+            center = helix_points[0][:2]
+            
+            # Check radius
+            for point in helix_points:
+                radius = np.linalg.norm(point[:2] - center)
+                self.assertAlmostEqual(radius, expected_radius, delta=0.1)
+            
+            # Check total angle traversed
+            if revolutions is not None:
+                # Calculate total angle traversed
+                total_angle = 0.0
+                for i in range(1, len(helix_points)):
+                    v1 = helix_points[i-1][:2] - center
+                    v2 = helix_points[i][:2] - center
+                    angle = np.arccos(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+                    total_angle += angle
+                
+                expected_angle = revolutions * 2 * np.pi
+                self.assertAlmostEqual(total_angle, expected_angle, delta=0.5)
+            
+            # Check Z-depth distribution
+            z_values = [p[2] for p in helix_points]
+            self.assertAlmostEqual(min(z_values), -10.0, delta=0.1)  # Should reach target depth
+            # Z should decrease approximately linearly
+            z_diffs = np.diff(z_values)
+            avg_diff = np.mean(z_diffs)
+            max_deviation = np.max(np.abs(z_diffs - avg_diff))
+            self.assertLess(max_deviation, 0.1)  # Z steps should be fairly uniform
+
 if __name__ == '__main__':
     unittest.main() 

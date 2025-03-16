@@ -81,6 +81,9 @@ class ToolpathParameters:
     final_pass_depth: float = 0.5  # Depth for final finishing pass
     entry_type: str = "plunge"  # Type of Z entry ("plunge", "ramp", "helix")
     ramp_angle: float = 3.0  # Angle for ramping entry in degrees
+    helix_diameter: float = 0.8  # Diameter of helix as fraction of tool diameter
+    helix_angle: float = 5.0  # Angle of helix descent in degrees
+    helix_revolutions: Optional[float] = None  # Number of revolutions (if None, calculated from angles)
 
 class CollisionDetector:
     """Handles collision detection during toolpath generation."""
@@ -204,6 +207,52 @@ class ToolpathGenerator:
         
         return toolpath
         
+    def _generate_helix_points(
+        self,
+        center_x: float,
+        center_y: float,
+        start_z: float,
+        end_z: float
+    ) -> List[np.ndarray]:
+        """
+        Generate points for a helical entry move.
+        
+        Args:
+            center_x: X coordinate of helix center
+            center_y: Y coordinate of helix center
+            start_z: Starting Z height
+            end_z: Target Z height
+            
+        Returns:
+            List of 3D points defining the helical path
+        """
+        # Calculate helix parameters
+        tool_radius = self.params.tool.diameter / 2.0
+        helix_radius = tool_radius * self.params.helix_diameter / 2.0
+        helix_angle_rad = np.radians(self.params.helix_angle)
+        
+        # Calculate number of revolutions if not specified
+        if self.params.helix_revolutions is None:
+            z_diff = abs(end_z - start_z)
+            pitch = z_diff * np.tan(helix_angle_rad)
+            revolutions = z_diff / pitch
+        else:
+            revolutions = self.params.helix_revolutions
+            
+        # Generate points along helix
+        points = []
+        num_points = max(20, int(revolutions * 16))  # At least 16 points per revolution
+        
+        for i in range(num_points + 1):
+            t = i / num_points
+            theta = t * revolutions * 2 * np.pi
+            x = center_x + helix_radius * np.cos(theta)
+            y = center_y + helix_radius * np.sin(theta)
+            z = start_z + t * (end_z - start_z)
+            points.append(np.array([x, y, z]))
+            
+        return points
+
     def _generate_pocket_path(self) -> List[np.ndarray]:
         """
         Generate pocket toolpath using specified strategy at multiple Z-levels.
@@ -328,7 +377,15 @@ class ToolpathGenerator:
                             start_point[1],
                             ramp_z
                         ]))
-                # TODO: Add helix entry implementation
+                elif self.params.entry_type == "helix":
+                    # Generate helix points
+                    helix_points = self._generate_helix_points(
+                        start_point[0],
+                        start_point[1],
+                        last_point[2],
+                        z_level
+                    )
+                    complete_toolpath.extend(helix_points)
                 
                 # Add cutting moves at this Z-level
                 for point in path_2d[1:]:
