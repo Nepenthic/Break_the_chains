@@ -327,28 +327,47 @@ class PerformanceVisualizer:
         
         function sanitizeNumber(value, decimals = 2) {
             if (!isValidNumber(value)) {
-                return 'N/A';
+                return {
+                    value: 'N/A',
+                    wasInvalid: true,
+                    originalValue: value
+                };
             }
-            return Number(value).toFixed(decimals);
+            return {
+                value: Number(value).toFixed(decimals),
+                wasInvalid: false,
+                originalValue: value
+            };
         }
         
         function validateDataArrays(arrays, names) {
             if (!arrays || !Array.isArray(arrays) || arrays.length === 0) {
-                throw new Error('No data arrays provided');
+                throw new Error('No data arrays provided for validation');
             }
             
             const length = arrays[0].length;
+            const errors = [];
+            
             for (let i = 1; i < arrays.length; i++) {
-                if (!Array.isArray(arrays[i]) || arrays[i].length !== length) {
-                    throw new Error(`${names[i]} array length mismatch: expected ${length}, got ${arrays[i].length}`);
+                if (!Array.isArray(arrays[i])) {
+                    errors.push(`${names[i]} is not an array`);
+                    continue;
+                }
+                if (arrays[i].length !== length) {
+                    errors.push(`Array length mismatch: '${names[i]}' has ${arrays[i].length} elements, expected ${length} (same as '${names[0]}')`);
                 }
             }
+            
+            if (errors.length > 0) {
+                throw new Error('Validation errors found:\\n' + errors.join('\\n'));
+            }
+            
             return length;
         }
         
         function sanitizeDataForExport(data) {
             if (!data || !data.shape_counts || !data.durations) {
-                throw new Error('Invalid data structure');
+                throw new Error('Invalid data structure: missing required fields (shape_counts and/or durations)');
             }
             
             try {
@@ -357,51 +376,138 @@ class PerformanceVisualizer:
                     ['shape_counts', 'durations']
                 );
                 
-                return {
-                    shape_counts: data.shape_counts.map(count => 
-                        isValidNumber(count) ? Math.round(count) : 'N/A'
-                    ),
-                    durations: data.durations.map(duration => 
-                        sanitizeNumber(duration, 2)
-                    )
+                const invalidCounts = [];
+                const sanitizedShapeCounts = data.shape_counts.map((count, index) => {
+                    if (!isValidNumber(count)) {
+                        invalidCounts.push({index, value: count});
+                        return 'N/A';
+                    }
+                    return Math.round(count);
+                });
+                
+                const invalidDurations = [];
+                const sanitizedDurations = data.durations.map((duration, index) => {
+                    const result = sanitizeNumber(duration, 2);
+                    if (result.wasInvalid) {
+                        invalidDurations.push({index, value: result.originalValue});
+                    }
+                    return result.value;
+                });
+                
+                // Generate detailed diagnostic message
+                let diagnostics = [];
+                if (invalidCounts.length > 0) {
+                    diagnostics.push(`Found ${invalidCounts.length} invalid shape count(s):\\n` +
+                        invalidCounts.map(({index, value}) => 
+                            `  - Index ${index}: ${value} (replaced with N/A)`).join('\\n'));
+                }
+                if (invalidDurations.length > 0) {
+                    diagnostics.push(`Found ${invalidDurations.length} invalid duration(s):\\n` +
+                        invalidDurations.map(({index, value}) => 
+                            `  - Index ${index}: ${value} (replaced with N/A)`).join('\\n'));
+                }
+                
+                const result = {
+                    shape_counts: sanitizedShapeCounts,
+                    durations: sanitizedDurations
                 };
+                
+                if (diagnostics.length > 0) {
+                    result.diagnostics = diagnostics.join('\\n\\n');
+                }
+                
+                return result;
+                
             } catch (error) {
-                throw new Error(`Data validation failed: ${error.message}`);
+                throw new Error(`Data validation failed:\\n${error.message}`);
             }
         }
         
         function sanitizeComparisonDataForExport(data) {
             if (!data || !data.current || !data.comparison) {
-                throw new Error('Invalid comparison data structure');
+                throw new Error('Invalid comparison data structure: missing required fields (current and/or comparison)');
             }
             
             try {
                 const current = sanitizeDataForExport(data.current);
                 const comparison = sanitizeDataForExport(data.comparison);
                 
-                // Ensure both datasets have the same shape counts
-                if (JSON.stringify(current.shape_counts) !== JSON.stringify(comparison.shape_counts)) {
-                    throw new Error('Shape counts in comparison data do not match');
+                // Compare shape counts between current and comparison data
+                const currentCounts = current.shape_counts;
+                const comparisonCounts = comparison.shape_counts;
+                
+                if (JSON.stringify(currentCounts) !== JSON.stringify(comparisonCounts)) {
+                    const mismatchDetails = currentCounts.map((count, index) => {
+                        if (count !== comparisonCounts[index]) {
+                            return `  - Index ${index}: current=${count}, comparison=${comparisonCounts[index]}`;
+                        }
+                        return null;
+                    }).filter(detail => detail !== null);
+                    
+                    throw new Error(
+                        'Shape counts in comparison data do not match:\\n' +
+                        mismatchDetails.join('\\n')
+                    );
                 }
                 
-                return { current, comparison };
+                const result = { current, comparison };
+                
+                // Combine diagnostics from both datasets
+                const allDiagnostics = [];
+                if (current.diagnostics) {
+                    allDiagnostics.push('Current dataset diagnostics:\\n' + current.diagnostics);
+                }
+                if (comparison.diagnostics) {
+                    allDiagnostics.push('Comparison dataset diagnostics:\\n' + comparison.diagnostics);
+                }
+                
+                if (allDiagnostics.length > 0) {
+                    result.diagnostics = allDiagnostics.join('\\n\\n');
+                }
+                
+                return result;
+                
             } catch (error) {
-                throw new Error(`Comparison data validation failed: ${error.message}`);
+                throw new Error(`Comparison data validation failed:\\n${error.message}`);
             }
         }
         
         function showExportError(message) {
             const errorDiv = document.createElement('div');
             errorDiv.className = 'export-error';
-            errorDiv.textContent = `Export Error: ${message}`;
+            
+            // Format the error message for better readability
+            const formattedMessage = message.split('\\n').map(line => 
+                `<div class="${line.startsWith('  -') ? 'error-detail' : 'error-header'}">${line}</div>`
+            ).join('');
+            
+            errorDiv.innerHTML = `
+                <div class="error-title">Export Error</div>
+                <div class="error-content">${formattedMessage}</div>
+            `;
+            
             document.body.appendChild(errorDiv);
-            setTimeout(() => errorDiv.remove(), 5000);
+            
+            // Add click handler to dismiss
+            errorDiv.addEventListener('click', () => errorDiv.remove());
+            
+            // Auto-dismiss after 10 seconds
+            setTimeout(() => {
+                if (document.body.contains(errorDiv)) {
+                    errorDiv.remove();
+                }
+            }, 10000);
         }
         
         function exportData(format) {
             try {
                 const data = sanitizeDataForExport(window.currentData);
                 var content, filename, type;
+                
+                // Show diagnostics if any were generated during sanitization
+                if (data.diagnostics) {
+                    console.warn('Data sanitization diagnostics:\\n' + data.diagnostics);
+                }
                 
                 if (format === 'csv') {
                     content = 'Shape Count,Duration (ms)\\n';
@@ -411,7 +517,17 @@ class PerformanceVisualizer:
                     filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
                     type = 'text/csv';
                 } else if (format === 'json') {
-                    content = JSON.stringify(data, null, 2);
+                    // Include diagnostics in JSON export
+                    const exportData = {
+                        data: {
+                            shape_counts: data.shape_counts,
+                            durations: data.durations
+                        }
+                    };
+                    if (data.diagnostics) {
+                        exportData.diagnostics = data.diagnostics;
+                    }
+                    content = JSON.stringify(exportData, null, 2);
                     filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
                     type = 'application/json';
                 } else if (format === 'excel') {
@@ -434,6 +550,11 @@ class PerformanceVisualizer:
                 const data = sanitizeComparisonDataForExport(window.comparisonData);
                 var content, filename, type;
                 
+                // Show diagnostics if any were generated during sanitization
+                if (data.diagnostics) {
+                    console.warn('Comparison data sanitization diagnostics:\\n' + data.diagnostics);
+                }
+                
                 if (format === 'csv') {
                     content = 'Shape Count,Current Duration (ms),Comparison Duration (ms)\\n';
                     data.current.shape_counts.forEach((count, i) => {
@@ -442,7 +563,23 @@ class PerformanceVisualizer:
                     filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
                     type = 'text/csv';
                 } else if (format === 'json') {
-                    content = JSON.stringify(data, null, 2);
+                    // Include diagnostics in JSON export
+                    const exportData = {
+                        data: {
+                            current: {
+                                shape_counts: data.current.shape_counts,
+                                durations: data.current.durations
+                            },
+                            comparison: {
+                                shape_counts: data.comparison.shape_counts,
+                                durations: data.comparison.durations
+                            }
+                        }
+                    };
+                    if (data.diagnostics) {
+                        exportData.diagnostics = data.diagnostics;
+                    }
+                    content = JSON.stringify(exportData, null, 2);
                     filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
                     type = 'application/json';
                 } else if (format === 'excel') {
@@ -459,39 +596,6 @@ class PerformanceVisualizer:
                 showExportError(error.message);
             }
         }
-        
-        function downloadFile(content, filename, type) {
-            var blob = new Blob([content], { type: type });
-            var link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(link.href);  // Clean up the URL object
-        }
-        
-        function filterData(chartId, minValue, maxValue) {
-            var chart = document.getElementById(chartId);
-            var update = {
-                'xaxis.range': [minValue, maxValue]
-            };
-            Plotly.relayout(chart, update);
-        }
-        
-        function toggleComparison(chartId, showComparison) {
-            var chart = document.getElementById(chartId);
-            var update = {
-                'visible': showComparison ? [true, true] : [true, false]
-            };
-            Plotly.restyle(chart, update);
-        }
-        
-        function updateChartType(chartId, type) {
-            var chart = document.getElementById(chartId);
-            var update = {'type': type};
-            Plotly.restyle(chart, update);
-        }
         </script>
         """
         
@@ -501,19 +605,50 @@ class PerformanceVisualizer:
             position: fixed;
             top: 20px;
             right: 20px;
-            padding: 15px 20px;
-            background-color: #ff4444;
-            color: white;
-            border-radius: 5px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            padding: 20px;
+            background-color: #fff;
+            color: #333;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             z-index: 1000;
-            animation: fadeInOut 5s ease-in-out;
+            max-width: 400px;
+            cursor: pointer;
+            animation: fadeInOut 0.3s ease-in;
         }
+        
+        .error-title {
+            color: #e74c3c;
+            font-weight: bold;
+            font-size: 16px;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .error-content {
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        
+        .error-header {
+            margin: 8px 0 4px 0;
+            color: #333;
+        }
+        
+        .error-detail {
+            margin: 4px 0;
+            padding-left: 20px;
+            color: #666;
+            font-family: monospace;
+        }
+        
+        .export-error:hover {
+            box-shadow: 0 6px 8px rgba(0,0,0,0.15);
+        }
+        
         @keyframes fadeInOut {
             0% { opacity: 0; transform: translateY(-20px); }
-            10% { opacity: 1; transform: translateY(0); }
-            90% { opacity: 1; transform: translateY(0); }
-            100% { opacity: 0; transform: translateY(-20px); }
+            100% { opacity: 1; transform: translateY(0); }
         }
         """
         

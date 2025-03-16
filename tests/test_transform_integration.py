@@ -750,5 +750,153 @@ class TestTransformIntegration(unittest.TestCase):
             # Ensure original precision is not present
             self.assertNotIn('50.123456', content)
 
+    def test_detailed_error_messages(self):
+        """Test enhanced error messages with detailed diagnostics."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with various validation issues
+        shape_counts = [100, float('nan'), 1000]
+        durations = [50, 150]  # Mismatched length
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='error_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error message content
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check for array length mismatch message
+            self.assertIn("Array length mismatch: 'durations' has 2 elements, expected 3", content)
+            # Check for invalid value message
+            self.assertIn("Found 1 invalid shape count(s):", content)
+            self.assertIn("Index 1:", content)
+            self.assertIn("replaced with N/A", content)
+
+    def test_comparison_data_error_messages(self):
+        """Test detailed error messages for comparison data validation."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with mismatched shape counts
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        comparison_data = {
+            'shape_counts': [200, 600, 1200],
+            'durations': [45, 140, 230]
+        }
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='comparison_error_test',
+            comparison_data=comparison_data
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify comparison error message content
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check for shape count mismatch details
+            self.assertIn("Shape counts in comparison data do not match:", content)
+            self.assertIn("Index 0: current=100, comparison=200", content)
+            self.assertIn("Index 1: current=500, comparison=600", content)
+            self.assertIn("Index 2: current=1000, comparison=1200", content)
+
+    def test_export_error_styling(self):
+        """Test that error messages are properly styled in the HTML report."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data with validation issues
+        shape_counts = [100, float('inf'), 1000]
+        durations = [50, float('nan'), 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='style_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error styling
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check for styled error elements
+            self.assertIn("error-title", content)
+            self.assertIn("error-content", content)
+            self.assertIn("error-header", content)
+            self.assertIn("error-detail", content)
+            # Check for error message formatting
+            self.assertIn("Found 1 invalid shape count(s):", content)
+            self.assertIn("Found 1 invalid duration(s):", content)
+
+    def test_json_export_diagnostics(self):
+        """Test that diagnostics are included in JSON exports."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data with validation issues
+        shape_counts = [100, float('nan'), 1000]
+        durations = [50, float('inf'), 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='json_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify JSON export content
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check for diagnostics in JSON structure
+            self.assertIn('"diagnostics":', content)
+            self.assertIn('"data":', content)
+            self.assertIn('"shape_counts":', content)
+            self.assertIn('"durations":', content)
+            # Check for specific diagnostic messages
+            self.assertIn("Found 1 invalid shape count(s):", content)
+            self.assertIn("Found 1 invalid duration(s):", content)
+
 if __name__ == '__main__':
     unittest.main() 
