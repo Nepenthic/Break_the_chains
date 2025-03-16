@@ -252,5 +252,154 @@ class TestToolpathVisualization(unittest.TestCase):
         except Exception as e:
             self.fail(f"Complex visualization test failed: {str(e)}")
 
+    def test_tool_visualization(self):
+        """Test tool visualization along toolpath."""
+        # Create a simple tool
+        tool = ToolParameters(
+            tool_type=ToolType.ENDMILL,
+            diameter=10.0,
+            flutes=4,
+            length=50.0,
+            shank_diameter=10.0
+        )
+        
+        try:
+            # Test basic tool visualization
+            self.visualizer.plot_toolpath(
+                self.test_toolpath,
+                show_tool=True,
+                tool_params=tool
+            )
+            
+            # Test tool visualization with Z-level filtering
+            self.visualizer.plot_toolpath(
+                self.test_toolpath,
+                show_tool=True,
+                tool_params=tool,
+                z_filter=0.0
+            )
+            
+            # Test tool visualization with islands
+            self.visualizer.plot_toolpath(
+                self.test_toolpath,
+                show_tool=True,
+                tool_params=tool,
+                islands=self.test_islands
+            )
+        except Exception as e:
+            self.fail(f"Tool visualization failed: {str(e)}")
+            
+    def test_tool_mesh_generation(self):
+        """Test tool mesh generation and transformation."""
+        # Create a simple tool
+        tool = ToolParameters(
+            tool_type=ToolType.ENDMILL,
+            diameter=10.0,
+            flutes=4,
+            length=50.0,
+            shank_diameter=10.0
+        )
+        
+        # Create tool visualizer
+        tool_vis = ToolVisualizer(tool)
+        
+        # Generate tool mesh
+        vertices, faces = tool_vis.generate_tool_mesh()
+        
+        # Basic validation
+        self.assertIsNotNone(vertices)
+        self.assertIsNotNone(faces)
+        self.assertGreater(len(vertices), 0)
+        self.assertGreater(len(faces), 0)
+        
+        # Test mesh dimensions
+        vertex_array = np.array(vertices)
+        self.assertEqual(vertex_array.shape[1], 3)  # 3D points
+        
+        # Check diameter
+        xy_coords = vertex_array[:, :2]
+        max_radius = np.max(np.linalg.norm(xy_coords, axis=1))
+        self.assertAlmostEqual(max_radius, tool.diameter/2, places=2)
+        
+        # Check length
+        z_coords = vertex_array[:, 2]
+        self.assertAlmostEqual(np.max(z_coords), tool.length, places=2)
+        self.assertAlmostEqual(np.min(z_coords), 0.0, places=2)
+        
+        # Test mesh transformation
+        position = np.array([10.0, 20.0, 30.0])
+        direction = np.array([1.0, 1.0, 1.0])
+        
+        transformed_vertices = tool_vis.transform_tool_mesh(vertices, position, direction)
+        
+        # Check transformation
+        self.assertEqual(transformed_vertices.shape, vertex_array.shape)
+        
+        # Check position
+        center = np.mean(transformed_vertices, axis=0)
+        self.assertAlmostEqual(center[0], position[0], places=2)
+        self.assertAlmostEqual(center[1], position[1], places=2)
+        
+    def test_complex_tool_visualization(self):
+        """Test tool visualization with complex toolpath and different tool types."""
+        # Create different tool types
+        tools = [
+            ToolParameters(  # Standard endmill
+                tool_type=ToolType.ENDMILL,
+                diameter=10.0,
+                flutes=4,
+                length=50.0,
+                shank_diameter=10.0
+            ),
+            ToolParameters(  # Ball endmill
+                tool_type=ToolType.BALL_ENDMILL,
+                diameter=8.0,
+                flutes=2,
+                length=40.0,
+                shank_diameter=8.0
+            ),
+            ToolParameters(  # Bull nose endmill
+                tool_type=ToolType.BULL_NOSE_ENDMILL,
+                diameter=12.0,
+                flutes=3,
+                length=60.0,
+                shank_diameter=12.0
+            )
+        ]
+        
+        # Create a complex spiral toolpath
+        complex_toolpath = []
+        clearance_z = 10.0
+        cutting_z = 0.0
+        
+        # Add spiral pattern
+        center = np.array([50.0, 50.0])
+        for t in np.linspace(0, 4*np.pi, 100):
+            r = 2 * t
+            x = center[0] + r * np.cos(t)
+            y = center[1] + r * np.sin(t)
+            complex_toolpath.append(np.array([x, y, cutting_z]))
+        
+        try:
+            # Test each tool type
+            for tool in tools:
+                self.visualizer.plot_toolpath(
+                    complex_toolpath,
+                    show_tool=True,
+                    tool_params=tool,
+                    title=f"{tool.tool_type.value} Visualization"
+                )
+                
+                # Test with islands
+                self.visualizer.plot_toolpath(
+                    complex_toolpath,
+                    show_tool=True,
+                    tool_params=tool,
+                    islands=self.test_islands,
+                    title=f"{tool.tool_type.value} with Islands"
+                )
+        except Exception as e:
+            self.fail(f"Complex tool visualization failed: {str(e)}")
+
 if __name__ == '__main__':
     unittest.main() 
