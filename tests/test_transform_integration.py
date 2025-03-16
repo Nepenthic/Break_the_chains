@@ -1355,5 +1355,189 @@ class TestTransformIntegration(unittest.TestCase):
             self.assertIn('application/json', content)
             self.assertIn('application/vnd.ms-excel', content)
 
+    def test_export_progress_indicator(self):
+        """Test that progress indicator is properly implemented in the HTML report."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='progress_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify progress indicator elements and functionality
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check progress container and bar
+            self.assertIn('class="progress-container"', content)
+            self.assertIn('class="progress-bar"', content)
+            
+            # Check progress functions
+            self.assertIn('function showProgress', content)
+            self.assertIn('function updateProgress', content)
+            
+            # Check progress updates in export functions
+            self.assertIn('updateProgress(20)', content)
+            self.assertIn('updateProgress(40)', content)
+            self.assertIn('updateProgress(60)', content)
+            self.assertIn('updateProgress(80)', content)
+            self.assertIn('updateProgress(100)', content)
+
+    def test_export_status_messages(self):
+        """Test that status messages are properly implemented in the HTML report."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='status_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify status message elements and functionality
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check status message container
+            self.assertIn('class="status-message"', content)
+            
+            # Check status message styles
+            self.assertIn('status-success', content)
+            self.assertIn('status-error', content)
+            self.assertIn('status-warning', content)
+            self.assertIn('status-info', content)
+            
+            # Check status message function
+            self.assertIn('function showStatus', content)
+            
+            # Check status messages in export functions
+            self.assertIn('Preparing data for export', content)
+            self.assertIn('Data exported successfully', content)
+            self.assertIn('Preparing comparison data for export', content)
+            self.assertIn('Comparison data exported successfully', content)
+
+    def test_export_ui_interaction(self):
+        """Test that export UI elements are properly implemented and interactive."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data with comparison
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        comparison_data = {
+            'shape_counts': [100, 500, 1000],
+            'durations': [45, 140, 230]
+        }
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='ui_test',
+            comparison_data=comparison_data
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify UI elements and interaction
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check export buttons
+            self.assertIn('onclick="exportData(\'csv\')"', content)
+            self.assertIn('onclick="exportData(\'json\')"', content)
+            self.assertIn('onclick="exportData(\'excel\')"', content)
+            
+            # Check comparison export buttons
+            self.assertIn('onclick="exportComparisonData(\'csv\')"', content)
+            self.assertIn('onclick="exportComparisonData(\'json\')"', content)
+            self.assertIn('onclick="exportComparisonData(\'excel\')"', content)
+            
+            # Check button styling
+            self.assertIn('class="btn btn-primary"', content)
+            self.assertIn('class="btn btn-secondary"', content)
+            
+            # Check export controls container
+            self.assertIn('class="export-controls mb-4"', content)
+            self.assertIn('class="button-group"', content)
+
+    def test_export_error_handling_ui(self):
+        """Test that export error handling is properly implemented in the UI."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Generate test data with invalid values
+        shape_counts = [100, float('nan'), 1000]
+        durations = [50, float('inf'), 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='error_ui_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error handling in UI
+        with open(report_file, 'r') as f:
+            content = f.read()
+            
+            # Check error handling in export functions
+            self.assertIn('catch (error)', content)
+            self.assertIn('showStatus(error.message, \'error\')', content)
+            
+            # Check error message styling
+            self.assertIn('background-color: #FFEBEE', content)
+            self.assertIn('color: #C62828', content)
+            
+            # Check error cleanup
+            self.assertIn('showProgress(false)', content)
+            self.assertIn('updateProgress(0)', content)
+
 if __name__ == '__main__':
     unittest.main() 

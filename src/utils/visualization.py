@@ -312,585 +312,271 @@ class PerformanceVisualizer:
         
         return filename
     
-    def generate_html_report(self, report_data, chart_files):
-        """Generate HTML report with embedded interactive visualizations."""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        html_file = f'{self.output_dir}/performance_report_{timestamp}.html'
-        
-        # Add JavaScript for interactive filtering and export functionality
-        js_code = """
-        <script>
-        // Data validation utilities
-        function isValidNumber(value) {
-            return typeof value === 'number' && !isNaN(value) && isFinite(value);
-        }
-        
-        function sanitizeNumber(value, decimals = 2) {
-            if (!isValidNumber(value)) {
-                return {
-                    value: 'N/A',
-                    wasInvalid: true,
-                    originalValue: value
-                };
+    def generate_html_report(self, test_data, chart_files):
+        """Generate an HTML report with interactive visualizations and export functionality."""
+        # Add CSS for progress indicator and status messages
+        css = """
+            .progress-container {
+                width: 100%;
+                margin: 10px 0;
+                display: none;
             }
-            return {
-                value: Number(value).toFixed(decimals),
-                wasInvalid: false,
-                originalValue: value
-            };
-        }
-        
-        function validateDataArrays(arrays, names) {
-            if (!arrays || !Array.isArray(arrays) || arrays.length === 0) {
-                throw new Error('No data arrays provided for validation');
+            .progress-bar {
+                width: 0%;
+                height: 4px;
+                background-color: #4CAF50;
+                transition: width 0.3s ease-in-out;
             }
-            
-            const length = arrays[0].length;
-            const errors = [];
-            
-            for (let i = 1; i < arrays.length; i++) {
-                if (!Array.isArray(arrays[i])) {
-                    errors.push(`${names[i]} is not an array`);
-                    continue;
-                }
-                if (arrays[i].length !== length) {
-                    errors.push(`Array length mismatch: '${names[i]}' has ${arrays[i].length} elements, expected ${length} (same as '${names[0]}')`);
-                }
+            .status-message {
+                margin: 5px 0;
+                padding: 8px;
+                border-radius: 4px;
+                display: none;
             }
-            
-            if (errors.length > 0) {
-                throw new Error('Validation errors found:\\n' + errors.join('\\n'));
+            .status-success {
+                background-color: #E8F5E9;
+                color: #2E7D32;
+                border: 1px solid #A5D6A7;
             }
-            
-            return length;
-        }
-        
-        function sanitizeDataForExport(data) {
-            if (!data || !data.shape_counts || !data.durations) {
-                throw new Error('Invalid data structure: missing required fields (shape_counts and/or durations)');
+            .status-error {
+                background-color: #FFEBEE;
+                color: #C62828;
+                border: 1px solid #FFCDD2;
             }
-            
-            try {
-                validateDataArrays(
-                    [data.shape_counts, data.durations],
-                    ['shape_counts', 'durations']
-                );
+            .status-warning {
+                background-color: #FFF3E0;
+                color: #EF6C00;
+                border: 1px solid #FFE0B2;
+            }
+            .status-info {
+                background-color: #E3F2FD;
+                color: #1565C0;
+                border: 1px solid #90CAF9;
+            }
+        """
+
+        # Add JavaScript for progress and status handling
+        js = """
+            function showProgress(show = true) {
+                document.querySelector('.progress-container').style.display = show ? 'block' : 'none';
+            }
+
+            function updateProgress(percent) {
+                document.querySelector('.progress-bar').style.width = `${percent}%`;
+            }
+
+            function showStatus(message, type = 'info') {
+                const statusEl = document.querySelector('.status-message');
+                statusEl.textContent = message;
+                statusEl.className = `status-message status-${type}`;
+                statusEl.style.display = 'block';
                 
-                const invalidCounts = [];
-                const sanitizedShapeCounts = data.shape_counts.map((count, index) => {
-                    if (!isValidNumber(count)) {
-                        invalidCounts.push({index, value: count});
-                        return 'N/A';
+                // Auto-hide success messages after 3 seconds
+                if (type === 'success') {
+                    setTimeout(() => {
+                        statusEl.style.display = 'none';
+                    }, 3000);
+                }
+            }
+
+            async function exportData(format) {
+                showProgress();
+                showStatus('Preparing data for export...', 'info');
+                
+                try {
+                    // Validate data
+                    updateProgress(20);
+                    const validationResult = validateDataArrays(window.currentData.shape_counts, window.currentData.durations);
+                    if (!validationResult.isValid) {
+                        throw new Error(validationResult.error);
                     }
-                    return Math.round(count);
-                });
-                
-                const invalidDurations = [];
-                const sanitizedDurations = data.durations.map((duration, index) => {
-                    const result = sanitizeNumber(duration, 2);
-                    if (result.wasInvalid) {
-                        invalidDurations.push({index, value: result.originalValue});
-                    }
-                    return result.value;
-                });
-                
-                // Generate detailed diagnostic message
-                let diagnostics = [];
-                if (invalidCounts.length > 0) {
-                    diagnostics.push(`Found ${invalidCounts.length} invalid shape count(s):\\n` +
-                        invalidCounts.map(({index, value}) => 
-                            `  - Index ${index}: ${value} (replaced with N/A)`).join('\\n'));
-                }
-                if (invalidDurations.length > 0) {
-                    diagnostics.push(`Found ${invalidDurations.length} invalid duration(s):\\n` +
-                        invalidDurations.map(({index, value}) => 
-                            `  - Index ${index}: ${value} (replaced with N/A)`).join('\\n'));
-                }
-                
-                const result = {
-                    shape_counts: sanitizedShapeCounts,
-                    durations: sanitizedDurations
-                };
-                
-                if (diagnostics.length > 0) {
-                    result.diagnostics = diagnostics.join('\\n\\n');
-                }
-                
-                return result;
-                
-            } catch (error) {
-                throw new Error(`Data validation failed:\\n${error.message}`);
-            }
-        }
-        
-        function sanitizeComparisonDataForExport(data) {
-            if (!data || !data.current || !data.comparison) {
-                throw new Error('Invalid comparison data structure: missing required fields (current and/or comparison)');
-            }
-            
-            try {
-                const current = sanitizeDataForExport(data.current);
-                const comparison = sanitizeDataForExport(data.comparison);
-                
-                // Compare shape counts between current and comparison data
-                const currentCounts = current.shape_counts;
-                const comparisonCounts = comparison.shape_counts;
-                
-                if (JSON.stringify(currentCounts) !== JSON.stringify(comparisonCounts)) {
-                    const mismatchDetails = currentCounts.map((count, index) => {
-                        if (count !== comparisonCounts[index]) {
-                            return `  - Index ${index}: current=${count}, comparison=${comparisonCounts[index]}`;
-                        }
-                        return null;
-                    }).filter(detail => detail !== null);
                     
-                    throw new Error(
-                        'Shape counts in comparison data do not match:\\n' +
-                        mismatchDetails.join('\\n')
-                    );
-                }
-                
-                const result = { current, comparison };
-                
-                // Combine diagnostics from both datasets
-                const allDiagnostics = [];
-                if (current.diagnostics) {
-                    allDiagnostics.push('Current dataset diagnostics:\\n' + current.diagnostics);
-                }
-                if (comparison.diagnostics) {
-                    allDiagnostics.push('Comparison dataset diagnostics:\\n' + comparison.diagnostics);
-                }
-                
-                if (allDiagnostics.length > 0) {
-                    result.diagnostics = allDiagnostics.join('\\n\\n');
-                }
-                
-                return result;
-                
-            } catch (error) {
-                throw new Error(`Comparison data validation failed:\\n${error.message}`);
-            }
-        }
-        
-        function showExportError(message) {
-            const errorDiv = document.createElement('div');
-            errorDiv.className = 'export-error';
-            
-            // Format the error message for better readability
-            const formattedMessage = message.split('\\n').map(line => 
-                `<div class="${line.startsWith('  -') ? 'error-detail' : 'error-header'}">${line}</div>`
-            ).join('');
-            
-            errorDiv.innerHTML = `
-                <div class="error-title">Export Error</div>
-                <div class="error-content">${formattedMessage}</div>
-            `;
-            
-            document.body.appendChild(errorDiv);
-            
-            // Add click handler to dismiss
-            errorDiv.addEventListener('click', () => errorDiv.remove());
-            
-            // Auto-dismiss after 10 seconds
-            setTimeout(() => {
-                if (document.body.contains(errorDiv)) {
-                    errorDiv.remove();
-                }
-            }, 10000);
-        }
-        
-        function exportData(format) {
-            try {
-                const data = sanitizeDataForExport(window.currentData);
-                var content, filename, type;
-                
-                // Show diagnostics if any were generated during sanitization
-                if (data.diagnostics) {
-                    console.warn('Data sanitization diagnostics:\\n' + data.diagnostics);
-                }
-                
-                if (format === 'csv') {
-                    content = 'Shape Count,Duration (ms)\\n';
-                    data.shape_counts.forEach((count, i) => {
-                        content += `${count},${data.durations[i]}\\n`;
-                    });
-                    filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
-                    type = 'text/csv';
-                } else if (format === 'json') {
-                    // Include diagnostics in JSON export
-                    const exportData = {
-                        data: {
-                            shape_counts: data.shape_counts,
-                            durations: data.durations
-                        }
-                    };
-                    if (data.diagnostics) {
-                        exportData.diagnostics = data.diagnostics;
+                    // Sanitize data
+                    updateProgress(40);
+                    const sanitizedData = sanitizeDataForExport(window.currentData);
+                    
+                    // Format data
+                    updateProgress(60);
+                    let exportContent;
+                    let filename;
+                    const timestamp = new Date().toISOString().slice(0,19).replace(/[:-]/g, '');
+                    
+                    switch(format) {
+                        case 'csv':
+                            exportContent = formatCSV(sanitizedData);
+                            filename = `performance_data_${timestamp}.csv`;
+                            break;
+                        case 'json':
+                            exportContent = formatJSON(sanitizedData);
+                            filename = `performance_data_${timestamp}.json`;
+                            break;
+                        case 'excel':
+                            exportContent = formatExcel(sanitizedData);
+                            filename = `performance_data_${timestamp}.xls`;
+                            break;
+                        default:
+                            throw new Error(`Unsupported format: ${format}`);
                     }
-                    content = JSON.stringify(exportData, null, 2);
-                    filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
-                    type = 'application/json';
-                } else if (format === 'excel') {
-                    content = 'Shape Count\\tDuration (ms)\\n';
-                    data.shape_counts.forEach((count, i) => {
-                        content += `${count}\\t${data.durations[i]}\\n`;
-                    });
-                    filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
-                    type = 'application/vnd.ms-excel';
+                    
+                    // Create and trigger download
+                    updateProgress(80);
+                    const blob = new Blob([exportContent], { type: getMimeType(format) });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    updateProgress(100);
+                    showStatus(`Data exported successfully as ${format.toUpperCase()}`, 'success');
+                } catch (error) {
+                    showStatus(error.message, 'error');
+                } finally {
+                    setTimeout(() => {
+                        showProgress(false);
+                        updateProgress(0);
+                    }, 1000);
                 }
-                
-                downloadFile(content, filename, type);
-            } catch (error) {
-                showExportError(error.message);
             }
-        }
-        
-        function exportComparisonData(format) {
-            try {
-                const data = sanitizeComparisonDataForExport(window.comparisonData);
-                var content, filename, type;
+
+            async function exportComparisonData(format) {
+                showProgress();
+                showStatus('Preparing comparison data for export...', 'info');
                 
-                // Show diagnostics if any were generated during sanitization
-                if (data.diagnostics) {
-                    console.warn('Comparison data sanitization diagnostics:\\n' + data.diagnostics);
-                }
-                
-                if (format === 'csv') {
-                    content = 'Shape Count,Current Duration (ms),Comparison Duration (ms)\\n';
-                    data.current.shape_counts.forEach((count, i) => {
-                        content += `${count},${data.current.durations[i]},${data.comparison.durations[i]}\\n`;
-                    });
-                    filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
-                    type = 'text/csv';
-                } else if (format === 'json') {
-                    // Include diagnostics in JSON export
-                    const exportData = {
-                        data: {
-                            current: {
-                                shape_counts: data.current.shape_counts,
-                                durations: data.current.durations
-                            },
-                            comparison: {
-                                shape_counts: data.comparison.shape_counts,
-                                durations: data.comparison.durations
-                            }
-                        }
-                    };
-                    if (data.diagnostics) {
-                        exportData.diagnostics = data.diagnostics;
+                try {
+                    // Validate both datasets
+                    updateProgress(20);
+                    const currentValidation = validateDataArrays(window.currentData.shape_counts, window.currentData.durations);
+                    const comparisonValidation = validateDataArrays(window.comparisonData.shape_counts, window.comparisonData.durations);
+                    
+                    if (!currentValidation.isValid || !comparisonValidation.isValid) {
+                        throw new Error('Invalid data in current or comparison dataset');
                     }
-                    content = JSON.stringify(exportData, null, 2);
-                    filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
-                    type = 'application/json';
-                } else if (format === 'excel') {
-                    content = 'Shape Count\\tCurrent Duration (ms)\\tComparison Duration (ms)\\n';
-                    data.current.shape_counts.forEach((count, i) => {
-                        content += `${count}\\t${data.current.durations[i]}\\t${data.comparison.durations[i]}\\n`;
-                    });
-                    filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
-                    type = 'application/vnd.ms-excel';
+                    
+                    // Validate matching shape counts
+                    if (!arraysMatch(window.currentData.shape_counts, window.comparisonData.shape_counts)) {
+                        throw new Error('Shape counts in current and comparison data do not match');
+                    }
+                    
+                    // Sanitize both datasets
+                    updateProgress(40);
+                    const sanitizedCurrent = sanitizeDataForExport(window.currentData);
+                    const sanitizedComparison = sanitizeDataForExport(window.comparisonData);
+                    
+                    // Format data
+                    updateProgress(60);
+                    let exportContent;
+                    let filename;
+                    const timestamp = new Date().toISOString().slice(0,19).replace(/[:-]/g, '');
+                    
+                    switch(format) {
+                        case 'csv':
+                            exportContent = formatComparisonCSV(sanitizedCurrent, sanitizedComparison);
+                            filename = `comparison_data_${timestamp}.csv`;
+                            break;
+                        case 'json':
+                            exportContent = formatComparisonJSON(sanitizedCurrent, sanitizedComparison);
+                            filename = `comparison_data_${timestamp}.json`;
+                            break;
+                        case 'excel':
+                            exportContent = formatComparisonExcel(sanitizedCurrent, sanitizedComparison);
+                            filename = `comparison_data_${timestamp}.xls`;
+                            break;
+                        default:
+                            throw new Error(`Unsupported format: ${format}`);
+                    }
+                    
+                    // Create and trigger download
+                    updateProgress(80);
+                    const blob = new Blob([exportContent], { type: getMimeType(format) });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    updateProgress(100);
+                    showStatus(`Comparison data exported successfully as ${format.toUpperCase()}`, 'success');
+                } catch (error) {
+                    showStatus(error.message, 'error');
+                } finally {
+                    setTimeout(() => {
+                        showProgress(false);
+                        updateProgress(0);
+                    }, 1000);
                 }
-                
-                downloadFile(content, filename, type);
-            } catch (error) {
-                showExportError(error.message);
             }
-        }
-        </script>
         """
-        
-        # Add export error styling
-        export_error_style = """
-        .export-error {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 20px;
-            background-color: #fff;
-            color: #333;
-            border-radius: 8px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            z-index: 1000;
-            max-width: 400px;
-            cursor: pointer;
-            animation: fadeInOut 0.3s ease-in;
-        }
-        
-        .error-title {
-            color: #e74c3c;
-            font-weight: bold;
-            font-size: 16px;
-            margin-bottom: 10px;
-            padding-bottom: 5px;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .error-content {
-            font-size: 14px;
-            line-height: 1.4;
-        }
-        
-        .error-header {
-            margin: 8px 0 4px 0;
-            color: #333;
-        }
-        
-        .error-detail {
-            margin: 4px 0;
-            padding-left: 20px;
-            color: #666;
-            font-family: monospace;
-        }
-        
-        .export-error:hover {
-            box-shadow: 0 6px 8px rgba(0,0,0,0.15);
-        }
-        
-        @keyframes fadeInOut {
-            0% { opacity: 0; transform: translateY(-20px); }
-            100% { opacity: 1; transform: translateY(0); }
-        }
-        """
-        
-        # Add export controls HTML
-        export_controls = """
-        <div class="export-controls">
-            <h3>Export Data</h3>
-            <div class="control-group">
-                <label>Current Data:</label>
-                <div class="button-group">
-                    <button onclick="exportData('csv')" class="export-button">CSV</button>
-                    <button onclick="exportData('json')" class="export-button">JSON</button>
-                    <button onclick="exportData('excel')" class="export-button">Excel</button>
-                </div>
-            </div>
-            <div class="control-group">
-                <label>Comparison Data:</label>
-                <div class="button-group">
-                    <button onclick="exportComparisonData('csv')" class="export-button">CSV</button>
-                    <button onclick="exportComparisonData('json')" class="export-button">JSON</button>
-                    <button onclick="exportComparisonData('excel')" class="export-button">Excel</button>
-                </div>
-            </div>
-        </div>
-        """
-        
-        # Combine with existing filter controls
-        filter_controls = f"""
-        <div class="filter-controls">
-            <div class="control-group">
-                <label for="shape-count-min">Min Shape Count:</label>
-                <input type="number" id="shape-count-min" value="0" 
-                       onchange="filterData('duration-chart', this.value, document.getElementById('shape-count-max').value)">
-            </div>
-            <div class="control-group">
-                <label for="shape-count-max">Max Shape Count:</label>
-                <input type="number" id="shape-count-max" value="5000"
-                       onchange="filterData('duration-chart', document.getElementById('shape-count-min').value, this.value)">
-            </div>
-            <div class="control-group">
-                <label for="comparison-toggle">Show Comparison:</label>
-                <input type="checkbox" id="comparison-toggle"
-                       onchange="toggleComparison('duration-chart', this.checked)">
-            </div>
-            <div class="control-group">
-                <label for="chart-type">Chart Type:</label>
-                <select id="chart-type" onchange="updateChartType('duration-chart', this.value)">
-                    <option value="scatter">Line + Markers</option>
-                    <option value="bar">Bar</option>
-                    <option value="heatmap">Heatmap</option>
-                </select>
-            </div>
-            {export_controls}
-        </div>
-        """
-        
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Performance Test Report - {timestamp}</title>
-            <style>
-                {export_error_style}
-                body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f8f9fa; }}
-                .container {{ max-width: 1200px; margin: 0 auto; padding: 40px 20px; }}
-                .header {{ 
-                    text-align: center; 
-                    margin-bottom: 40px;
-                    background: #fff;
-                    padding: 30px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }}
-                .metrics {{ 
-                    display: grid; 
-                    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                    gap: 20px;
-                    margin: 20px 0;
-                }}
-                .metric-box {{ 
-                    padding: 25px; 
-                    background: #fff; 
-                    border-radius: 10px;
-                    text-align: center;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    transition: transform 0.2s;
-                }}
-                .metric-box:hover {{
-                    transform: translateY(-5px);
-                }}
-                .visualization {{ 
-                    margin: 30px 0;
-                    background: #fff;
-                    padding: 20px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }}
-                .visualization iframe {{ 
-                    width: 100%;
-                    height: 500px;
-                    border: none;
-                    border-radius: 5px;
-                }}
-                .recommendations {{ margin: 30px 0; }}
-                .recommendation {{ 
-                    padding: 15px;
-                    margin: 10px 0;
-                    border-radius: 5px;
-                    background: #fff;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }}
-                .high {{ border-left: 4px solid #ff4444; }}
-                .medium {{ border-left: 4px solid #ffbb33; }}
-                .low {{ border-left: 4px solid #00C851; }}
-                .system-info {{
-                    background: #fff;
-                    padding: 20px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    margin-top: 30px;
-                }}
-                h1, h2, h3, h4 {{ color: #2c3e50; }}
-                .success-rate {{
-                    font-size: 24px;
-                    font-weight: bold;
-                    color: {self._get_success_rate_color(report_data)}
-                }}
-                .filter-controls {{
-                    background: #fff;
-                    padding: 20px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    margin: 20px 0;
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 20px;
-                }}
-                .control-group {{
-                    display: flex;
-                    flex-direction: column;
-                    gap: 5px;
-                }}
-                .control-group label {{
-                    font-size: 14px;
-                    color: #2c3e50;
-                }}
-                .control-group input[type="number"] {{
-                    width: 100px;
-                    padding: 5px;
-                    border: 1px solid #ddd;
-                    border-radius: 4px;
-                }}
-                .control-group select {{
-                    padding: 5px;
-                    border: 1px solid #ddd;
-                    border-radius: 4px;
-                    background: #fff;
-                }}
-                .export-controls {{
-                    margin-top: 20px;
-                    padding: 20px;
-                    background: #fff;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }}
-                .export-controls h3 {{
-                    margin: 0 0 15px 0;
-                    color: #2c3e50;
-                }}
-                .button-group {{
-                    display: flex;
-                    gap: 10px;
-                    margin-top: 5px;
-                }}
-                .export-button {{
-                    padding: 8px 15px;
-                    border: none;
-                    border-radius: 4px;
-                    background: #3498db;
-                    color: white;
-                    cursor: pointer;
-                    transition: background 0.2s;
-                }}
-                .export-button:hover {{
-                    background: #2980b9;
-                }}
-            </style>
-            {js_code}
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>Performance Test Report</h1>
-                    <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-                </div>
-                
-                {filter_controls}
-                
-                <div class="metrics">
-                    <div class="metric-box">
-                        <h3>Tests Run</h3>
-                        <p style="font-size: 24px;">{report_data['test_results']['tests_run']}</p>
+
+        # Generate HTML content
+        html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Performance Test Report</title>
+                <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+                <style>{css}</style>
+            </head>
+            <body>
+                <div class="container mt-4">
+                    <h1 class="mb-4">Performance Test Report</h1>
+                    
+                    <!-- Progress and Status -->
+                    <div class="progress-container">
+                        <div class="progress-bar"></div>
                     </div>
-                    <div class="metric-box">
-                        <h3>Success Rate</h3>
-                        <p class="success-rate">
-                            {(report_data['test_results']['tests_run'] - 
-                              report_data['test_results']['failures']) / 
-                              report_data['test_results']['tests_run'] * 100:.1f}%
-                        </p>
+                    <div class="status-message"></div>
+                    
+                    <!-- Export Controls -->
+                    <div class="export-controls mb-4">
+                        <h3>Export Options</h3>
+                        <div class="button-group">
+                            <button onclick="exportData('csv')" class="btn btn-primary">Export as CSV</button>
+                            <button onclick="exportData('json')" class="btn btn-primary">Export as JSON</button>
+                            <button onclick="exportData('excel')" class="btn btn-primary">Export as Excel</button>
+                        </div>
+                        
+                        {{% if has_comparison_data %}}
+                        <div class="button-group mt-2">
+                            <button onclick="exportComparisonData('csv')" class="btn btn-secondary">Export Comparison as CSV</button>
+                            <button onclick="exportComparisonData('json')" class="btn btn-secondary">Export Comparison as JSON</button>
+                            <button onclick="exportComparisonData('excel')" class="btn btn-secondary">Export Comparison as Excel</button>
+                        </div>
+                        {{% endif %}}
                     </div>
-                    <div class="metric-box">
-                        <h3>Failed Tests</h3>
-                        <p style="font-size: 24px; color: #ff4444;">
-                            {report_data['test_results']['failures']}
-                        </p>
-                    </div>
-                </div>
-                
-                <div class="visualizations">
-                    <h2>Performance Visualizations</h2>
+                    
+                    <!-- Test Results -->
+                    {self._generate_test_results_section(test_data)}
+                    
+                    <!-- Charts -->
                     {self._generate_chart_sections(chart_files)}
+                    
+                    <!-- System Info -->
+                    {self._generate_system_info_section(test_data.get('system_info', {}))}
+                    
+                    <!-- Recommendations -->
+                    {self._generate_recommendation_sections(test_data.get('recommendations', []))}
                 </div>
                 
-                <div class="recommendations">
-                    <h2>Recommendations</h2>
-                    {self._generate_recommendation_sections(report_data['recommendations'])}
-                </div>
-                
-                <div class="system-info">
-                    <h2>System Information</h2>
-                    {self._generate_system_info_section(report_data['system_info'])}
-                </div>
-            </div>
-        </body>
-        </html>
+                <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+                <script>{js}</script>
+            </body>
+            </html>
         """
+
+        # Save report
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_file = os.path.join(self.output_dir, f'performance_report_{timestamp}.html')
+        with open(report_file, 'w') as f:
+            f.write(html)
         
-        with open(html_file, 'w') as f:
-            f.write(html_content)
-        
-        return html_file
+        return report_file
     
     def _generate_chart_sections(self, chart_files):
         """Generate HTML sections for interactive charts."""
