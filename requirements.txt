@@ -4,4 +4,6 @@ trimesh>=3.9.0  # For 3D mesh processing and STL export
 networkx>=2.8.0  # Required by trimesh for certain operations
 pyglet>=2.0.0  # For 3D visualization (required by trimesh)
 pytest>=7.0.0  # For testing
-black>=22.0.0  # For code formatting 
+black>=22.0.0  # For code formatting
+PyQt6>=6.4.0   # For GUI components
+pyopengl>=3.1.6  # For OpenGL rendering
