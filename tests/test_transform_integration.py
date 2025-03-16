@@ -611,5 +611,144 @@ class TestTransformIntegration(unittest.TestCase):
         import shutil
         shutil.rmtree(output_dir)
 
+    def test_export_with_invalid_data(self):
+        """Test export functionality with invalid data."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with NaN and infinite values
+        shape_counts = [100, 500, 1000, 2000]
+        durations = [50, float('nan'), float('inf'), 250]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='invalid_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify data validation and sanitization
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check for sanitization functions
+            self.assertIn('sanitizeNumber', content)
+            self.assertIn('validateDataArrays', content)
+            self.assertIn('sanitizeDataForExport', content)
+            # Check for error handling
+            self.assertIn('showExportError', content)
+            self.assertIn('export-error', content)
+            # Check for data embedding with sanitized values
+            self.assertIn('"durations":', content)
+            self.assertIn('N/A', content)  # NaN should be replaced with N/A
+
+    def test_export_with_mismatched_arrays(self):
+        """Test export functionality with mismatched array lengths."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with different array lengths
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150]  # Missing one value
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='mismatch_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error handling for mismatched arrays
+        with open(report_file, 'r') as f:
+            content = f.read()
+            self.assertIn('array length mismatch', content)
+
+    def test_export_with_invalid_comparison(self):
+        """Test export functionality with invalid comparison data."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with different shape counts in comparison
+        shape_counts = [100, 500, 1000]
+        durations = [50, 150, 250]
+        comparison_data = {
+            'shape_counts': [200, 600, 1200],  # Different shape counts
+            'durations': [45, 140, 230]
+        }
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='invalid_comparison',
+            comparison_data=comparison_data
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify error handling for invalid comparison data
+        with open(report_file, 'r') as f:
+            content = f.read()
+            self.assertIn('Shape counts in comparison data do not match', content)
+
+    def test_export_with_decimal_precision(self):
+        """Test export functionality with decimal precision handling."""
+        visualizer = PerformanceVisualizer(output_dir='test_reports')
+        
+        # Test data with many decimal places
+        shape_counts = [100, 500, 1000]
+        durations = [50.123456, 150.987654, 250.543210]
+        
+        chart_file = visualizer.plot_transform_durations(
+            shape_counts, durations,
+            test_type='precision_test'
+        )
+        
+        report_file = visualizer.generate_html_report(
+            {
+                'test_results': {
+                    'tests_run': 10,
+                    'failures': 0
+                },
+                'system_info': {},
+                'recommendations': []
+            },
+            [chart_file]
+        )
+        
+        # Verify decimal precision in exported data
+        with open(report_file, 'r') as f:
+            content = f.read()
+            # Check that numbers are rounded to 2 decimal places
+            self.assertIn('50.12', content)
+            self.assertIn('150.99', content)
+            self.assertIn('250.54', content)
+            # Ensure original precision is not present
+            self.assertNotIn('50.123456', content)
+
 if __name__ == '__main__':
     unittest.main() 

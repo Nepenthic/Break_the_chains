@@ -320,6 +320,157 @@ class PerformanceVisualizer:
         # Add JavaScript for interactive filtering and export functionality
         js_code = """
         <script>
+        // Data validation utilities
+        function isValidNumber(value) {
+            return typeof value === 'number' && !isNaN(value) && isFinite(value);
+        }
+        
+        function sanitizeNumber(value, decimals = 2) {
+            if (!isValidNumber(value)) {
+                return 'N/A';
+            }
+            return Number(value).toFixed(decimals);
+        }
+        
+        function validateDataArrays(arrays, names) {
+            if (!arrays || !Array.isArray(arrays) || arrays.length === 0) {
+                throw new Error('No data arrays provided');
+            }
+            
+            const length = arrays[0].length;
+            for (let i = 1; i < arrays.length; i++) {
+                if (!Array.isArray(arrays[i]) || arrays[i].length !== length) {
+                    throw new Error(`${names[i]} array length mismatch: expected ${length}, got ${arrays[i].length}`);
+                }
+            }
+            return length;
+        }
+        
+        function sanitizeDataForExport(data) {
+            if (!data || !data.shape_counts || !data.durations) {
+                throw new Error('Invalid data structure');
+            }
+            
+            try {
+                validateDataArrays(
+                    [data.shape_counts, data.durations],
+                    ['shape_counts', 'durations']
+                );
+                
+                return {
+                    shape_counts: data.shape_counts.map(count => 
+                        isValidNumber(count) ? Math.round(count) : 'N/A'
+                    ),
+                    durations: data.durations.map(duration => 
+                        sanitizeNumber(duration, 2)
+                    )
+                };
+            } catch (error) {
+                throw new Error(`Data validation failed: ${error.message}`);
+            }
+        }
+        
+        function sanitizeComparisonDataForExport(data) {
+            if (!data || !data.current || !data.comparison) {
+                throw new Error('Invalid comparison data structure');
+            }
+            
+            try {
+                const current = sanitizeDataForExport(data.current);
+                const comparison = sanitizeDataForExport(data.comparison);
+                
+                // Ensure both datasets have the same shape counts
+                if (JSON.stringify(current.shape_counts) !== JSON.stringify(comparison.shape_counts)) {
+                    throw new Error('Shape counts in comparison data do not match');
+                }
+                
+                return { current, comparison };
+            } catch (error) {
+                throw new Error(`Comparison data validation failed: ${error.message}`);
+            }
+        }
+        
+        function showExportError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'export-error';
+            errorDiv.textContent = `Export Error: ${message}`;
+            document.body.appendChild(errorDiv);
+            setTimeout(() => errorDiv.remove(), 5000);
+        }
+        
+        function exportData(format) {
+            try {
+                const data = sanitizeDataForExport(window.currentData);
+                var content, filename, type;
+                
+                if (format === 'csv') {
+                    content = 'Shape Count,Duration (ms)\\n';
+                    data.shape_counts.forEach((count, i) => {
+                        content += `${count},${data.durations[i]}\\n`;
+                    });
+                    filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
+                    type = 'text/csv';
+                } else if (format === 'json') {
+                    content = JSON.stringify(data, null, 2);
+                    filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
+                    type = 'application/json';
+                } else if (format === 'excel') {
+                    content = 'Shape Count\\tDuration (ms)\\n';
+                    data.shape_counts.forEach((count, i) => {
+                        content += `${count}\\t${data.durations[i]}\\n`;
+                    });
+                    filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
+                    type = 'application/vnd.ms-excel';
+                }
+                
+                downloadFile(content, filename, type);
+            } catch (error) {
+                showExportError(error.message);
+            }
+        }
+        
+        function exportComparisonData(format) {
+            try {
+                const data = sanitizeComparisonDataForExport(window.comparisonData);
+                var content, filename, type;
+                
+                if (format === 'csv') {
+                    content = 'Shape Count,Current Duration (ms),Comparison Duration (ms)\\n';
+                    data.current.shape_counts.forEach((count, i) => {
+                        content += `${count},${data.current.durations[i]},${data.comparison.durations[i]}\\n`;
+                    });
+                    filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
+                    type = 'text/csv';
+                } else if (format === 'json') {
+                    content = JSON.stringify(data, null, 2);
+                    filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
+                    type = 'application/json';
+                } else if (format === 'excel') {
+                    content = 'Shape Count\\tCurrent Duration (ms)\\tComparison Duration (ms)\\n';
+                    data.current.shape_counts.forEach((count, i) => {
+                        content += `${count}\\t${data.current.durations[i]}\\t${data.comparison.durations[i]}\\n`;
+                    });
+                    filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
+                    type = 'application/vnd.ms-excel';
+                }
+                
+                downloadFile(content, filename, type);
+            } catch (error) {
+                showExportError(error.message);
+            }
+        }
+        
+        function downloadFile(content, filename, type) {
+            var blob = new Blob([content], { type: type });
+            var link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);  // Clean up the URL object
+        }
+        
         function filterData(chartId, minValue, maxValue) {
             var chart = document.getElementById(chartId);
             var update = {
@@ -341,79 +492,29 @@ class PerformanceVisualizer:
             var update = {'type': type};
             Plotly.restyle(chart, update);
         }
-        
-        function exportData(format) {
-            var data = window.currentData;
-            if (!data) {
-                alert('No data available to export.');
-                return;
-            }
-            
-            var content, filename, type;
-            if (format === 'csv') {
-                content = 'Shape Count,Duration (ms)\\n';
-                data.shape_counts.forEach((count, i) => {
-                    content += `${count},${data.durations[i]}\\n`;
-                });
-                filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
-                type = 'text/csv';
-            } else if (format === 'json') {
-                content = JSON.stringify(data, null, 2);
-                filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
-                type = 'application/json';
-            } else if (format === 'excel') {
-                content = 'Shape Count\\tDuration (ms)\\n';
-                data.shape_counts.forEach((count, i) => {
-                    content += `${count}\\t${data.durations[i]}\\n`;
-                });
-                filename = `performance_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
-                type = 'application/vnd.ms-excel';
-            }
-            
-            downloadFile(content, filename, type);
-        }
-        
-        function exportComparisonData(format) {
-            var data = window.comparisonData;
-            if (!data) {
-                alert('No comparison data available to export.');
-                return;
-            }
-            
-            var content, filename, type;
-            if (format === 'csv') {
-                content = 'Shape Count,Current Duration (ms),Comparison Duration (ms)\\n';
-                data.current.shape_counts.forEach((count, i) => {
-                    content += `${count},${data.current.durations[i]},${data.comparison.durations[i]}\\n`;
-                });
-                filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.csv`;
-                type = 'text/csv';
-            } else if (format === 'json') {
-                content = JSON.stringify(data, null, 2);
-                filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.json`;
-                type = 'application/json';
-            } else if (format === 'excel') {
-                content = 'Shape Count\\tCurrent Duration (ms)\\tComparison Duration (ms)\\n';
-                data.current.shape_counts.forEach((count, i) => {
-                    content += `${count}\\t${data.current.durations[i]}\\t${data.comparison.durations[i]}\\n`;
-                });
-                filename = `comparison_data_${new Date().toISOString().slice(0,19).replace(/[:]/g, '')}.xls`;
-                type = 'application/vnd.ms-excel';
-            }
-            
-            downloadFile(content, filename, type);
-        }
-        
-        function downloadFile(content, filename, type) {
-            var blob = new Blob([content], { type: type });
-            var link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
         </script>
+        """
+        
+        # Add export error styling
+        export_error_style = """
+        .export-error {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            background-color: #ff4444;
+            color: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            z-index: 1000;
+            animation: fadeInOut 5s ease-in-out;
+        }
+        @keyframes fadeInOut {
+            0% { opacity: 0; transform: translateY(-20px); }
+            10% { opacity: 1; transform: translateY(0); }
+            90% { opacity: 1; transform: translateY(0); }
+            100% { opacity: 0; transform: translateY(-20px); }
+        }
         """
         
         # Add export controls HTML
@@ -475,6 +576,7 @@ class PerformanceVisualizer:
         <head>
             <title>Performance Test Report - {timestamp}</title>
             <style>
+                {export_error_style}
                 body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f8f9fa; }}
                 .container {{ max-width: 1200px; margin: 0 auto; padding: 40px 20px; }}
                 .header {{ 
