@@ -84,6 +84,10 @@ class ToolpathParameters:
     helix_diameter: float = 0.8  # Diameter of helix as fraction of tool diameter
     helix_angle: float = 5.0  # Angle of helix descent in degrees
     helix_revolutions: Optional[float] = None  # Number of revolutions (if None, calculated from angles)
+    debug_visualization: bool = False  # Enable visualization for debugging
+    show_clearance_moves: bool = True  # Show clearance moves in visualization
+    show_entry_points: bool = True  # Show entry points in visualization
+    z_filter: Optional[float] = None  # Filter visualization to specific Z-level
 
 class CollisionDetector:
     """Handles collision detection during toolpath generation."""
@@ -125,6 +129,10 @@ class ToolpathGenerator:
         self.collision_detector = collision_detector
         self.toolpath: List[np.ndarray] = []
         self.clearance_height = 10.0  # mm above stock
+        self.visualizer = None
+        if self.params.debug_visualization:
+            from .visualization import ToolpathVisualizer
+            self.visualizer = ToolpathVisualizer(self.clearance_height)
         
     def generate_toolpath(self) -> List[np.ndarray]:
         """
@@ -134,12 +142,26 @@ class ToolpathGenerator:
             List of points defining the toolpath
         """
         if self.params.toolpath_type == ToolpathType.CONTOUR:
-            return self._generate_contour_path()
+            toolpath = self._generate_contour_path()
         elif self.params.toolpath_type == ToolpathType.POCKET:
-            return self._generate_pocket_path()
+            toolpath = self._generate_pocket_path()
         elif self.params.toolpath_type == ToolpathType.SURFACE:
-            return self._generate_surface_path()
-        # Add other toolpath strategies
+            toolpath = self._generate_surface_path()
+        else:
+            raise ValueError(f"Unsupported toolpath type: {self.params.toolpath_type}")
+        
+        # Visualize toolpath if debug visualization is enabled
+        if self.params.debug_visualization and self.visualizer:
+            self.visualizer.plot_toolpath(
+                toolpath,
+                islands=self.params.islands,
+                show_clearance=self.params.show_clearance_moves,
+                show_entry_points=self.params.show_entry_points,
+                z_filter=self.params.z_filter,
+                title=f"{self.params.toolpath_type.value} Toolpath"
+            )
+        
+        return toolpath
         
     def _generate_contour_path(self) -> List[np.ndarray]:
         """
