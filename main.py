@@ -1,8 +1,8 @@
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                           QHBoxLayout, QTabWidget, QLabel)
+                           QHBoxLayout, QTabWidget, QLabel, QShortcut)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QVector3D
+from PyQt6.QtGui import QVector3D, QKeySequence
 from shapes_tab import ShapesTab
 from transform_tab import TransformTab
 from viewport import Viewport
@@ -35,6 +35,7 @@ class CADCAMMainWindow(QMainWindow):
         self.transform_tab = TransformTab()
         self.transform_tab.transform_applied.connect(self.onTransformApplied)
         self.transform_tab.transform_mode_changed.connect(self.onTransformModeChanged)
+        self.transform_tab.snap_settings_changed.connect(self.onSnapSettingsChanged)
         
         boolean_tab = QWidget()
         cam_tab = QWidget()
@@ -50,93 +51,186 @@ class CADCAMMainWindow(QMainWindow):
         right_layout.addWidget(tab_widget)
         main_layout.addWidget(right_panel, stretch=1)
         
-    def onShapeCreated(self, shape_type, parameters):
-        """Handle shape creation request from the Shapes tab"""
-        print(f"Creating {shape_type} with parameters: {parameters}")
+        # Store shape IDs for reference
+        self.shape_ids = {}
         
-        shape = None
+        # Set up keyboard shortcuts
+        self.setupShortcuts()
         
-        if shape_type == "Cube":
-            # Create a cube with the specified parameters
-            shape = Cube(size=parameters.get("Width", 1.0))
-            # Position it slightly above the grid
-            shape.position = QVector3D(0, 0, parameters.get("Height", 1.0) / 2)
+    def setupShortcuts(self):
+        """Set up keyboard shortcuts for the application"""
+        # Transform mode shortcuts
+        QShortcut(QKeySequence("T"), self).activated.connect(
+            lambda: self.onTransformModeChanged("translate"))
+        QShortcut(QKeySequence("R"), self).activated.connect(
+            lambda: self.onTransformModeChanged("rotate"))
+        QShortcut(QKeySequence("S"), self).activated.connect(
+            lambda: self.onTransformModeChanged("scale"))
+        
+        # Axis selection shortcuts
+        QShortcut(QKeySequence("Alt+X"), self).activated.connect(
+            lambda: self.onAxisSelected("x"))
+        QShortcut(QKeySequence("Alt+Y"), self).activated.connect(
+            lambda: self.onAxisSelected("y"))
+        QShortcut(QKeySequence("Alt+Z"), self).activated.connect(
+            lambda: self.onAxisSelected("z"))
+        
+        # Snapping shortcut
+        QShortcut(QKeySequence("Ctrl+G"), self).activated.connect(
+            self.toggleSnapping)
+        
+        # Cancel transform mode
+        QShortcut(QKeySequence("Esc"), self).activated.connect(
+            self.cancelTransform)
             
-        elif shape_type == "Sphere":
-            # Create a sphere with the specified parameters
-            shape = Sphere(
-                radius=parameters.get("Radius", 1.0),
-                segments=int(parameters.get("Segments", 32))
-            )
-            # Position it slightly above the grid
-            shape.position = QVector3D(0, 0, parameters.get("Radius", 1.0))
+        # Apply transform
+        QShortcut(QKeySequence("Return"), self).activated.connect(
+            self.applyCurrentTransform)
             
-        elif shape_type == "Cylinder":
-            # Create a cylinder with the specified parameters
-            shape = Cylinder(
-                radius=parameters.get("Radius", 1.0),
-                height=parameters.get("Height", 2.0),
-                segments=int(parameters.get("Segments", 32))
-            )
-            # Position it slightly above the grid
-            shape.position = QVector3D(0, 0, parameters.get("Height", 2.0) / 2)
+        # Toggle relative mode
+        QShortcut(QKeySequence("Alt+R"), self).activated.connect(
+            self.toggleRelativeMode)
             
-        if shape:
-            # Add the shape to the viewport
-            self.viewport.addShape(shape)
-            # Select the new shape
-            self.viewport.selectShape(shape)
+        # Undo/Redo
+        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(
+            self.undoTransform)
+        QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(
+            self.redoTransform)
+            
+    def applyCurrentTransform(self):
+        """Apply the current transform using the Enter key."""
+        if self.viewport.transform_mode:
+            self.transform_tab.applyTransform()
+            
+    def toggleRelativeMode(self):
+        """Toggle between relative and absolute transform modes."""
+        self.transform_tab.relative_mode.setChecked(
+            not self.transform_tab.relative_mode.isChecked())
+            
+    def undoTransform(self):
+        """Undo the last transform operation."""
+        if self.viewport.scene_manager.undo_transform():
+            self.viewport.showStatusMessage("Transform Undone")
+            self.viewport.update()
+            
+    def redoTransform(self):
+        """Redo the last undone transform operation."""
+        if self.viewport.scene_manager.redo_transform():
+            self.viewport.showStatusMessage("Transform Redone")
+            self.viewport.update()
+            
+    def onTransformModeChanged(self, mode):
+        """Handle transform mode changes."""
+        print(f"Transform mode changed to: {mode}")
+        
+        # Update transform tab
+        self.transform_tab.setCurrentMode(mode)
+        
+        # Update viewport
+        self.viewport.setTransformMode(mode)
+        
+        # Clear active axis when changing modes
+        self.viewport.scene_manager.set_active_axis(None)
+        
+        # Show status message
+        if mode:
+            relative = "Relative" if self.transform_tab.relative_mode.isChecked() else "Absolute"
+            self.viewport.showStatusMessage(f"Transform Mode: {mode.capitalize()} ({relative})")
+        else:
+            self.viewport.showStatusMessage("Transform Mode: None")
+            
+        # Update viewport
+        self.viewport.update()
+        
+    def onAxisSelected(self, axis):
+        """Handle axis selection."""
+        # Only process if we're in a transform mode
+        if self.viewport.transform_mode:
+            self.transform_tab.setActiveAxis(axis)
+            self.viewport.scene_manager.set_active_axis(axis)
+            mode = self.transform_tab.getTransformMode()
+            self.viewport.showStatusMessage(f"Active Axis: {axis.upper()} ({mode})")
+            self.viewport.update()
+            
+    def cancelTransform(self):
+        """Cancel current transform mode."""
+        self.onTransformModeChanged(None)
+        self.viewport.showStatusMessage("Transform Cancelled")
+        
+    def toggleSnapping(self):
+        """Toggle snapping on/off."""
+        self.transform_tab.toggleSnapping()
+        # Viewport will be updated through the snap_settings_changed signal
+        
+    def onSnapSettingsChanged(self, settings):
+        """Handle changes to snapping settings."""
+        print(f"Updating snapping settings: {settings}")
+        self.viewport.scene_manager.set_snap_settings(settings)
+        self.viewport.updateSnapState(settings['enabled'])
+        self.viewport.update()  # Refresh viewport to show updated grid
         
     def onTransformApplied(self, transform_type, parameters):
         """Handle transform application request from the Transform tab"""
         print(f"Applying {transform_type} transform with parameters: {parameters}")
         
         # Get the selected shape
-        shape = self.viewport.getSelectedShape()
-        if not shape:
+        selected = self.viewport.scene_manager.get_selected_shape()
+        if not selected:
             return
             
-        # Apply the transformation
-        if parameters["mode"] == "translate":
-            axis = parameters["axis"]
-            value = parameters["value"]
-            current_pos = shape.position
-            if axis == "x":
-                shape.position = QVector3D(current_pos.x() + value, current_pos.y(), current_pos.z())
-            elif axis == "y":
-                shape.position = QVector3D(current_pos.x(), current_pos.y() + value, current_pos.z())
-            elif axis == "z":
-                shape.position = QVector3D(current_pos.x(), current_pos.y(), current_pos.z() + value)
-                
-        elif parameters["mode"] == "rotate":
-            axis = parameters["axis"]
-            value = parameters["value"]
-            current_rot = shape.rotation
-            if axis == "x":
-                shape.rotation = QVector3D(current_rot.x() + value, current_rot.y(), current_rot.z())
-            elif axis == "y":
-                shape.rotation = QVector3D(current_rot.x(), current_rot.y() + value, current_rot.z())
-            elif axis == "z":
-                shape.rotation = QVector3D(current_rot.x(), current_rot.y(), current_rot.z() + value)
-                
-        elif parameters["mode"] == "scale":
-            axis = parameters["axis"]
-            value = parameters["value"]
-            current_scale = shape.scale
-            if axis == "x":
-                shape.scale = QVector3D(value, current_scale.y(), current_scale.z())
-            elif axis == "y":
-                shape.scale = QVector3D(current_scale.x(), value, current_scale.z())
-            elif axis == "z":
-                shape.scale = QVector3D(current_scale.x(), current_scale.y(), value)
-                
+        shape_id, shape = selected
+        
+        # Set transform mode if not already set
+        if self.viewport.scene_manager.get_transform_mode() != parameters["mode"]:
+            self.viewport.setTransformMode(parameters["mode"])
+            
+        # Set active axis based on parameter
+        self.viewport.scene_manager.set_active_axis(parameters["axis"])
+            
+        # Apply the transformation through the scene manager
+        success = self.viewport.scene_manager.apply_transform(
+            shape_id,
+            parameters["mode"],
+            parameters  # Now includes snapping and relative mode settings
+        )
+        
+        if success:
+            # Update transform tab with current transform
+            self.transform_tab.updateTransformValues(shape.transform)
+            
+            # Show success message
+            self.viewport.showStatusMessage(f"Transform Applied: {transform_type.capitalize()}")
+        else:
+            self.viewport.showStatusMessage("Transform Failed")
+        
         # Update the viewport
         self.viewport.update()
         
-    def onTransformModeChanged(self, mode):
-        """Handle transform mode changes for updating UI feedback"""
-        print(f"Transform mode changed to: {mode}")
-        # This will be used to update cursor and UI feedback later
+    def onShapeCreated(self, shape_type, parameters):
+        """Handle shape creation request from the Shapes tab"""
+        print(f"Creating {shape_type} with parameters: {parameters}")
+        
+        # Create shape through the viewport's scene manager
+        shape_id = self.viewport.scene_manager.create_shape(
+            shape_type.lower(),
+            parameters,
+            {
+                'position': [0, 0, parameters.get('Height', 1.0) / 2],
+                'rotation': [0, 0, 0],
+                'scale': [1, 1, 1]
+            }
+        )
+        
+        # Store the shape ID for future reference
+        self.shape_ids[shape_id] = shape_type
+        
+        # Select the new shape
+        self.viewport.selectShape(shape_id)
+        
+        # Update transform tab with initial transform
+        shape = self.viewport.scene_manager.get_shape(shape_id)
+        if shape:
+            self.transform_tab.updateTransformValues(shape.transform)
 
 def main():
     app = QApplication(sys.argv)
