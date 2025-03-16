@@ -3,28 +3,173 @@ import json
 import os
 from datetime import datetime
 import numpy as np
+import psutil
+import platform
+import GPUtil
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 from .test_transform_performance import TestTransformPerformance
 from ..utils.logging import TransformLogger
 from ..utils.visualization import PerformanceVisualizer
 
+@dataclass
+class HardwareProfile:
+    """Hardware profile information and capabilities."""
+    cpu_cores: int
+    cpu_threads: int
+    ram_total_gb: float
+    ram_available_gb: float
+    gpu_name: Optional[str]
+    gpu_memory_gb: Optional[float]
+    platform: str
+    
+    def calculate_performance_tier(self) -> str:
+        """Determine hardware performance tier based on specifications."""
+        score = 0
+        
+        # CPU scoring
+        if self.cpu_cores >= 8:
+            score += 3
+        elif self.cpu_cores >= 4:
+            score += 2
+        else:
+            score += 1
+            
+        # RAM scoring
+        if self.ram_total_gb >= 16:
+            score += 3
+        elif self.ram_total_gb >= 8:
+            score += 2
+        else:
+            score += 1
+            
+        # GPU scoring
+        if self.gpu_memory_gb:
+            if self.gpu_memory_gb >= 8:
+                score += 3
+            elif self.gpu_memory_gb >= 4:
+                score += 2
+            else:
+                score += 1
+        
+        # Determine tier
+        if score >= 7:
+            return "high-end"
+        elif score >= 4:
+            return "mid-range"
+        else:
+            return "low-end"
+    
+    def get_adaptive_thresholds(self) -> Dict[str, float]:
+        """Calculate adaptive performance thresholds based on hardware capabilities."""
+        tier = self.calculate_performance_tier()
+        base_thresholds = {
+            'single_transform_ms': 50,  # Base threshold for single transform
+            'bulk_transform_ms': 1000,  # Base threshold for 100 shapes
+            'complex_mesh_ms': 100,     # Base threshold for 100K vertices
+            'ui_frame_ms': 16.7,        # Target 60fps
+            'memory_increase_mb': 50,   # Max memory increase per operation
+        }
+        
+        # Adjust thresholds based on tier
+        multipliers = {
+            'high-end': 0.5,    # Expect better performance
+            'mid-range': 1.0,   # Base thresholds
+            'low-end': 2.0      # Allow more time
+        }
+        
+        return {k: v * multipliers[tier] for k, v in base_thresholds.items()}
+
+class HardwareProfiler:
+    """Detects and manages hardware capabilities for performance testing."""
+    
+    def __init__(self):
+        self.logger = TransformLogger('hardware_profiler.log')
+    
+    def detect_hardware_profile(self) -> HardwareProfile:
+        """Detect current hardware capabilities."""
+        try:
+            # CPU information
+            cpu_cores = psutil.cpu_count(logical=False)
+            cpu_threads = psutil.cpu_count(logical=True)
+            
+            # Memory information
+            memory = psutil.virtual_memory()
+            ram_total_gb = memory.total / (1024**3)
+            ram_available_gb = memory.available / (1024**3)
+            
+            # GPU information
+            gpu_name = None
+            gpu_memory_gb = None
+            try:
+                gpus = GPUtil.getGPUs()
+                if gpus:
+                    gpu = gpus[0]  # Use primary GPU
+                    gpu_name = gpu.name
+                    gpu_memory_gb = gpu.memoryTotal / 1024
+            except Exception as e:
+                self.logger.warning(f"GPU detection failed: {e}")
+            
+            profile = HardwareProfile(
+                cpu_cores=cpu_cores,
+                cpu_threads=cpu_threads,
+                ram_total_gb=ram_total_gb,
+                ram_available_gb=ram_available_gb,
+                gpu_name=gpu_name,
+                gpu_memory_gb=gpu_memory_gb,
+                platform=platform.platform()
+            )
+            
+            self.logger.info(
+                "Hardware profile detected",
+                extra={
+                    'profile': profile.__dict__,
+                    'performance_tier': profile.calculate_performance_tier(),
+                    'thresholds': profile.get_adaptive_thresholds()
+                }
+            )
+            
+            return profile
+            
+        except Exception as e:
+            self.logger.error(f"Hardware detection failed: {e}")
+            raise
+
 class PerformanceTestRunner:
-    """Runs performance tests and generates reports."""
+    """Runs performance tests and generates reports with hardware-aware thresholds."""
     
     def __init__(self):
         self.logger = TransformLogger('performance_test_runner.log')
         self.visualizer = PerformanceVisualizer()
         self.results = {}
         self.metrics = {}
+        self.hardware_profiler = HardwareProfiler()
+        
+        # Detect hardware profile and set thresholds
+        self.hardware_profile = self.hardware_profiler.detect_hardware_profile()
+        self.thresholds = self.hardware_profile.get_adaptive_thresholds()
         
         # Ensure reports directory exists
         os.makedirs('reports', exist_ok=True)
-    
-    def run_tests(self):
-        """Run all performance tests."""
-        self.logger.info("Starting performance test suite")
         
-        # Create test suite
-        suite = unittest.TestLoader().loadTestsFromTestCase(TestTransformPerformance)
+    def run_tests(self):
+        """Run all performance tests with hardware-aware thresholds."""
+        self.logger.info(
+            "Starting performance test suite",
+            extra={
+                'hardware_profile': self.hardware_profile.__dict__,
+                'thresholds': self.thresholds
+            }
+        )
+        
+        # Create test suite with hardware-aware thresholds
+        test_loader = unittest.TestLoader()
+        suite = test_loader.loadTestsFromTestCase(TestTransformPerformance)
+        
+        # Inject hardware profile and thresholds into test cases
+        for test in suite:
+            test.hardware_profile = self.hardware_profile
+            test.thresholds = self.thresholds
         
         # Run tests and collect metrics
         runner = unittest.TextTestRunner(verbosity=2)
@@ -37,7 +182,9 @@ class PerformanceTestRunner:
             'failures': len(test_result.failures),
             'errors': len(test_result.errors),
             'skipped': len(test_result.skipped),
-            'was_successful': test_result.wasSuccessful()
+            'was_successful': test_result.wasSuccessful(),
+            'hardware_profile': self.hardware_profile.__dict__,
+            'thresholds': self.thresholds
         }
         
         # Collect metrics from test cases
