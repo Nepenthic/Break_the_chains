@@ -2,7 +2,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                            QGroupBox, QFormLayout, QDoubleSpinBox,
                            QRadioButton, QButtonGroup, QLabel,
                            QHBoxLayout, QCheckBox, QGridLayout,
-                           QListWidget, QListWidgetItem)
+                           QListWidget, QListWidgetItem, QMenu,
+                           QLineEdit, QComboBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
 
 class TransformTab(QWidget):
@@ -19,6 +20,10 @@ class TransformTab(QWidget):
         self._relative_mode = False  # Track relative/absolute mode
         self._history = []  # Track transform history
         self._history_index = -1  # Current position in history
+        self._grouped_history = []  # Track grouped transforms
+        self._filter_text = ""  # Track search filter
+        self._filter_type = "all"  # Track type filter
+        self._filter_axis = "all"  # Track axis filter
         self.initUI()
         
     def initUI(self):
@@ -46,16 +51,48 @@ class TransformTab(QWidget):
         mode_group.setLayout(mode_layout)
         layout.addWidget(mode_group)
         
-        # History panel
+        # History panel with search and filters
         history_group = QGroupBox("Transform History")
         history_layout = QVBoxLayout()
         
-        # History list widget
+        # Search and filter controls
+        filter_layout = QGridLayout()
+        
+        # Search box
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search history...")
+        self.search_box.textChanged.connect(self.onSearchTextChanged)
+        self.search_box.setToolTip("Search by transform type, axis, or value")
+        filter_layout.addWidget(self.search_box, 0, 0, 1, 2)
+        
+        # Transform type filter
+        type_label = QLabel("Type:")
+        self.type_filter = QComboBox()
+        self.type_filter.addItems(["All", "Translate", "Rotate", "Scale"])
+        self.type_filter.currentTextChanged.connect(self.onFilterChanged)
+        self.type_filter.setToolTip("Filter by transform type")
+        filter_layout.addWidget(type_label, 1, 0)
+        filter_layout.addWidget(self.type_filter, 1, 1)
+        
+        # Axis filter
+        axis_label = QLabel("Axis:")
+        self.axis_filter = QComboBox()
+        self.axis_filter.addItems(["All", "X", "Y", "Z"])
+        self.axis_filter.currentTextChanged.connect(self.onFilterChanged)
+        self.axis_filter.setToolTip("Filter by axis")
+        filter_layout.addWidget(axis_label, 2, 0)
+        filter_layout.addWidget(self.axis_filter, 2, 1)
+        
+        history_layout.addLayout(filter_layout)
+        
+        # History list widget with enhanced functionality
         self.history_list = QListWidget()
         self.history_list.setMaximumHeight(150)
         self.history_list.setAlternatingRowColors(True)
-        self.history_list.itemClicked.connect(self.onHistoryItemClicked)
-        self.history_list.setToolTip("Click to jump to a specific transform state")
+        self.history_list.itemDoubleClicked.connect(self.onHistoryItemDoubleClicked)
+        self.history_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.history_list.customContextMenuRequested.connect(self.showHistoryContextMenu)
+        self.history_list.setToolTip("Double-click to restore a transform state\nRight-click for more options")
         history_layout.addWidget(self.history_list)
         
         # Undo/Redo buttons with tooltips
@@ -306,32 +343,128 @@ class TransformTab(QWidget):
         self.updateUndoRedoState()
         
     def updateHistoryList(self):
-        """Update the history list widget."""
+        """Update the history list widget with filtering."""
         self.history_list.clear()
+        current_group = None
+        group_items = []
+        visible_indices = []  # Track which items are visible
+        
         for i, transform in enumerate(self._history):
+            # Check if transform should be shown
+            if not self.shouldShowTransform(transform):
+                continue
+                
+            visible_indices.append(i)
             timestamp = transform['timestamp'].toString('hh:mm:ss')
             mode = transform['params']['mode']
             axis = transform['params']['axis']
             value = transform['params'].get('value', 0)
             relative = "Relative" if transform['params'].get('relative_mode', False) else "Absolute"
             
+            if transform['group_id'] != current_group:
+                # If we have a previous group, add it
+                if group_items:
+                    self.addGroupToList(group_items)
+                    group_items = []
+                current_group = transform['group_id']
+            
             item_text = f"{timestamp} - {mode.capitalize()} {axis.upper()}: {value:.2f} ({relative})"
             item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, i)  # Store history index
             
-            # Highlight current position in history
-            if i == self._history_index:
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
+            if transform['group_id'] is not None:
+                group_items.append(item)
+            else:
+                # Highlight current position in history
+                if i == self._history_index:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                self.history_list.addItem(item)
+        
+        # Add any remaining group
+        if group_items:
+            self.addGroupToList(group_items)
+            
+        # Update group button state
+        self.group_button.setEnabled(len(self.history_list.selectedItems()) > 1)
+            
+        # Scroll to current position if visible
+        if self._history_index in visible_indices:
+            for i in range(self.history_list.count()):
+                item = self.history_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == self._history_index:
+                    self.history_list.scrollToItem(item)
+                    break
+                    
+    def shouldShowTransform(self, transform):
+        """Check if a transform should be shown based on current filters."""
+        # Check text filter
+        if self._filter_text:
+            text = f"{transform['params']['mode']} {transform['params']['axis']} {transform['params'].get('value', 0)}"
+            if self._filter_text not in text.lower():
+                return False
                 
-            self.history_list.addItem(item)
+        # Check type filter
+        if self._filter_type != "all" and transform['params']['mode'] != self._filter_type:
+            return False
             
-        # Scroll to current position
-        if self._history_index >= 0:
-            self.history_list.scrollToItem(
-                self.history_list.item(self._history_index)
-            )
+        # Check axis filter
+        if self._filter_axis != "all" and transform['params']['axis'] != self._filter_axis.lower():
+            return False
             
+        return True
+        
+    def onSearchTextChanged(self, text):
+        """Handle search text changes."""
+        self._filter_text = text.lower()
+        self.updateHistoryList()
+        
+    def onFilterChanged(self, value):
+        """Handle filter changes."""
+        if self.sender() == self.type_filter:
+            self._filter_type = value.lower()
+        elif self.sender() == self.axis_filter:
+            self._filter_axis = value.lower()
+        self.updateHistoryList()
+        
+    def clearFilters(self):
+        """Clear all filters and search text."""
+        self.search_box.clear()
+        self.type_filter.setCurrentText("All")
+        self.axis_filter.setCurrentText("All")
+        self._filter_text = ""
+        self._filter_type = "all"
+        self._filter_axis = "all"
+        self.updateHistoryList()
+        
+    def showHistoryContextMenu(self, position):
+        """Show context menu for history items."""
+        menu = QMenu()
+        
+        # Get item at position
+        item = self.history_list.itemAt(position)
+        
+        # Add filter-related actions
+        clear_filters = menu.addAction("Clear Filters")
+        clear_filters.triggered.connect(self.clearFilters)
+        menu.addSeparator()
+        
+        if item:
+            # Add item-specific actions
+            restore_action = menu.addAction("Restore This State")
+            restore_action.triggered.connect(lambda: self.onHistoryItemDoubleClicked(item))
+            
+            if len(self.history_list.selectedItems()) > 1:
+                group_action = menu.addAction("Group Selected")
+                group_action.triggered.connect(self.groupSelectedTransforms)
+                
+            if isinstance(item.data(Qt.ItemDataRole.UserRole), list):
+                ungroup_action = menu.addAction("Ungroup")
+                ungroup_action.triggered.connect(lambda: self.ungroupTransforms(item))
+                
+        menu.exec(self.history_list.mapToGlobal(position))
+        
     def updateUndoRedoState(self):
         """Update the enabled state of undo/redo buttons."""
         self.undo_button.setEnabled(self._history_index >= 0)
@@ -356,7 +489,7 @@ class TransformTab(QWidget):
             # Emit signal to main window
             self.transform_applied.emit("redo", transform['params'])
             
-    def onHistoryItemClicked(self, item):
+    def onHistoryItemDoubleClicked(self, item):
         """Handle clicking on a history item."""
         index = self.history_list.row(item)
         if index == self._history_index:
