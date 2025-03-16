@@ -65,29 +65,51 @@ class PocketStrategy(Enum):
 
 @dataclass
 class ToolpathParameters:
-    """Toolpath generation parameters."""
+    """Parameters for toolpath generation."""
     toolpath_type: ToolpathType
     tool: ToolParameters
     cutting_params: CuttingParameters
-    stock_dimensions: Tuple[float, float, float]
-    tolerance: float = 0.01
-    stepover: float = 0.5  # As percentage of tool diameter
-    pocket_strategy: PocketStrategy = PocketStrategy.HYBRID
-    pocket_angle: float = 0.0  # Angle for zigzag paths in radians
-    islands: Optional[List[Dict[str, Union[List[np.ndarray], float]]]] = None  # List of islands with Z-depths
-    start_z: float = 0.0  # Starting Z-level (top of stock)
-    pocket_depth: float = 10.0  # Total depth of the pocket
-    step_down: float = 2.0  # Depth per pass
-    final_pass_depth: float = 0.5  # Depth for final finishing pass
-    entry_type: str = "plunge"  # Type of Z entry ("plunge", "ramp", "helix")
-    ramp_angle: float = 3.0  # Angle for ramping entry in degrees
-    helix_diameter: float = 0.8  # Diameter of helix as fraction of tool diameter
+    stock_dimensions: Tuple[float, float, float]  # (length, width, height)
+    islands: Optional[List[Dict[str, Union[List[np.ndarray], float]]]] = None
+    
+    # Visualization parameters
+    debug_visualization: bool = False
+    show_clearance_moves: bool = True
+    show_entry_points: bool = True
+    show_tool: bool = False
+    
+    # Material simulation parameters
+    simulate_material_removal: bool = False
+    simulation_voxel_size: float = 1.0  # Size of each voxel in mm
+    simulation_update_rate: int = 10  # Update visualization every N moves
+    show_stock_outline: bool = True  # Show original stock outline during simulation
+    
+    # Entry move parameters
+    entry_type: str = "plunge"  # "plunge", "ramp", or "helix"
+    helix_diameter: float = 0.8  # Diameter of helix as a fraction of tool diameter
     helix_angle: float = 5.0  # Angle of helix descent in degrees
-    helix_revolutions: Optional[float] = None  # Number of revolutions (if None, calculated from angles)
-    debug_visualization: bool = False  # Enable visualization for debugging
-    show_clearance_moves: bool = True  # Show clearance moves in visualization
-    show_entry_points: bool = True  # Show entry points in visualization
-    z_filter: Optional[float] = None  # Filter visualization to specific Z-level
+    helix_revolutions: Optional[float] = None  # Number of revolutions, calculated if None
+    
+    # Pocket parameters
+    pocket_strategy: PocketStrategy = PocketStrategy.ZIGZAG
+    stepover: float = 0.5  # Stepover as a fraction of tool diameter
+    stepdown: float = 1.0  # Maximum depth per cut in mm
+    pocket_depth: float = 10.0  # Total pocket depth in mm
+    start_z: float = 0.0  # Starting Z height
+    
+    # Safety parameters
+    clearance_height: float = 10.0  # Height for rapid moves
+    retract_height: float = 2.0  # Height for local retraction
+    
+    def __post_init__(self):
+        """Validate and process parameters after initialization."""
+        if self.toolpath_type == ToolpathType.POCKET and self.islands:
+            # Ensure islands have z_min and z_max
+            for island in self.islands:
+                if 'z_min' not in island:
+                    island['z_min'] = self.start_z - self.pocket_depth
+                if 'z_max' not in island:
+                    island['z_max'] = self.start_z
 
 class CollisionDetector:
     """Handles collision detection during toolpath generation."""
@@ -118,163 +140,98 @@ class CollisionDetector:
         pass
 
 class ToolpathGenerator:
-    """Generates optimized toolpaths for machining operations."""
+    """Generates toolpaths for various machining operations."""
     
-    def __init__(self, 
-                 model: 'Mesh',
-                 params: ToolpathParameters,
-                 collision_detector: CollisionDetector):
+    def __init__(
+        self,
+        model: Optional[Any],
+        params: ToolpathParameters,
+        collision_detector: Optional[CollisionDetector] = None
+    ):
+        """
+        Initialize toolpath generator.
+        
+        Args:
+            model: Optional 3D model for reference
+            params: Toolpath generation parameters
+            collision_detector: Optional collision detection system
+        """
         self.model = model
         self.params = params
         self.collision_detector = collision_detector
-        self.toolpath: List[np.ndarray] = []
-        self.clearance_height = 10.0  # mm above stock
-        self.visualizer = None
-        if self.params.debug_visualization:
-            from .visualization import ToolpathVisualizer
-            self.visualizer = ToolpathVisualizer(self.clearance_height)
+        self.material_simulator = None
         
+        # Initialize material simulator if enabled
+        if params.simulate_material_removal:
+            from .simulation import MaterialSimulator, StockParameters, StockType
+            stock_params = StockParameters(
+                stock_type=StockType.RECTANGULAR,
+                dimensions=params.stock_dimensions,
+                voxel_size=params.simulation_voxel_size
+            )
+            self.material_simulator = MaterialSimulator(stock_params)
+    
     def generate_toolpath(self) -> List[np.ndarray]:
         """
-        Generate optimized toolpath based on parameters.
-        
-        Returns:
-            List of points defining the toolpath
-        """
-        if self.params.toolpath_type == ToolpathType.CONTOUR:
-            toolpath = self._generate_contour_path()
-        elif self.params.toolpath_type == ToolpathType.POCKET:
-            toolpath = self._generate_pocket_path()
-        elif self.params.toolpath_type == ToolpathType.SURFACE:
-            toolpath = self._generate_surface_path()
-        else:
-            raise ValueError(f"Unsupported toolpath type: {self.params.toolpath_type}")
-        
-        # Visualize toolpath if debug visualization is enabled
-        if self.params.debug_visualization and self.visualizer:
-            self.visualizer.plot_toolpath(
-                toolpath,
-                islands=self.params.islands,
-                show_clearance=self.params.show_clearance_moves,
-                show_entry_points=self.params.show_entry_points,
-                z_filter=self.params.z_filter,
-                title=f"{self.params.toolpath_type.value} Toolpath"
-            )
-        
-        return toolpath
-        
-    def _generate_contour_path(self) -> List[np.ndarray]:
-        """
-        Generate contour toolpath.
+        Generate toolpath based on parameters.
         
         Returns:
             List of 3D points defining the toolpath
         """
-        # Extract contour from model at current Z level
-        # TODO: Get this from the model intersection with XY plane
-        contour_2d = self._extract_contour_at_z(0.0)
-        
-        # Calculate tool radius offset
-        tool_radius = self.params.tool.diameter / 2.0
-        offset_distance = tool_radius
-        
-        # Generate offset paths
-        paths_2d = []
-        current_offset = offset_distance
-        max_offsets = 10  # Prevent infinite loops
-        
-        for i in range(max_offsets):
-            # Generate offset contour
-            offset_path = offset_contour(
-                contour_2d,
-                current_offset,
-                OffsetDirection.OUTSIDE  # TODO: Make this configurable
-            )
+        if self.params.toolpath_type == ToolpathType.POCKET:
+            toolpath = self._generate_pocket_path()
+        else:
+            raise ValueError(f"Unsupported toolpath type: {self.params.toolpath_type}")
             
-            # Check if path is valid
-            if not offset_path or len(offset_path) < 3:
-                break
-                
-            paths_2d.append(offset_path)
-            current_offset += offset_distance * self.params.stepover
-        
-        # Optimize path connections
-        optimized_2d = optimize_path_connections(paths_2d)
-        
-        # Convert 2D paths to 3D toolpath
-        toolpath = []
-        current_z = self.clearance_height
-        
-        # Add initial move to clearance height
-        if optimized_2d and optimized_2d[0]:
-            start_point = optimized_2d[0][0]
-            toolpath.append(np.array([start_point[0], start_point[1], self.clearance_height]))
-        
-        # Process each path
-        for path_2d in optimized_2d:
-            # Move to start point at clearance height
-            start_point = path_2d[0]
-            toolpath.append(np.array([start_point[0], start_point[1], self.clearance_height]))
+        # Simulate material removal if enabled
+        if self.material_simulator:
+            self._simulate_material_removal(toolpath)
             
-            # Plunge to cutting depth
-            toolpath.append(np.array([start_point[0], start_point[1], 0.0]))  # TODO: Use actual Z depth
-            
-            # Add cutting moves
-            for point in path_2d[1:]:
-                toolpath.append(np.array([point[0], point[1], 0.0]))  # TODO: Use actual Z depth
-            
-            # Retract to clearance height
-            end_point = path_2d[-1]
-            toolpath.append(np.array([end_point[0], end_point[1], self.clearance_height]))
-        
         return toolpath
         
-    def _generate_helix_points(
-        self,
-        center_x: float,
-        center_y: float,
-        start_z: float,
-        end_z: float
-    ) -> List[np.ndarray]:
+    def _simulate_material_removal(self, toolpath: List[np.ndarray]) -> None:
         """
-        Generate points for a helical entry move.
+        Simulate material removal for the generated toolpath.
         
         Args:
-            center_x: X coordinate of helix center
-            center_y: Y coordinate of helix center
-            start_z: Starting Z height
-            end_z: Target Z height
-            
-        Returns:
-            List of 3D points defining the helical path
+            toolpath: List of 3D points defining the toolpath
         """
-        # Calculate helix parameters
-        tool_radius = self.params.tool.diameter / 2.0
-        helix_radius = tool_radius * self.params.helix_diameter / 2.0
-        helix_angle_rad = np.radians(self.params.helix_angle)
-        
-        # Calculate number of revolutions if not specified
-        if self.params.helix_revolutions is None:
-            z_diff = abs(end_z - start_z)
-            pitch = z_diff * np.tan(helix_angle_rad)
-            revolutions = z_diff / pitch
-        else:
-            revolutions = self.params.helix_revolutions
+        if not self.material_simulator:
+            return
             
-        # Generate points along helix
-        points = []
-        num_points = max(20, int(revolutions * 16))  # At least 16 points per revolution
+        def update_callback(voxel_grid):
+            """Callback for visualization updates during simulation."""
+            if self.params.debug_visualization:
+                import matplotlib.pyplot as plt
+                fig = plt.figure(figsize=(10, 10))
+                ax = fig.add_subplot(111, projection='3d')
+                self.material_simulator.visualize(
+                    ax=ax,
+                    show_original=self.params.show_stock_outline
+                )
+                plt.pause(0.1)
+                plt.close()
         
-        for i in range(num_points + 1):
-            t = i / num_points
-            theta = t * revolutions * 2 * np.pi
-            x = center_x + helix_radius * np.cos(theta)
-            y = center_y + helix_radius * np.sin(theta)
-            z = start_z + t * (end_z - start_z)
-            points.append(np.array([x, y, z]))
+        # Simulate material removal
+        self.material_simulator.simulate_toolpath(
+            toolpath=toolpath,
+            tool_diameter=self.params.tool.diameter,
+            islands=self.params.islands,
+            update_callback=update_callback if self.params.debug_visualization else None
+        )
+        
+        # Show final result if visualization is enabled
+        if self.params.debug_visualization:
+            import matplotlib.pyplot as plt
+            fig = plt.figure(figsize=(12, 8))
+            ax = fig.add_subplot(111, projection='3d')
+            self.material_simulator.visualize(
+                ax=ax,
+                show_original=self.params.show_stock_outline
+            )
+            plt.title("Final Material Removal Simulation")
+            plt.show()
             
-        return points
-
     def _generate_pocket_path(self) -> List[np.ndarray]:
         """
         Generate pocket toolpath using specified strategy at multiple Z-levels.
