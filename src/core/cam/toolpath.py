@@ -74,7 +74,7 @@ class ToolpathParameters:
     stepover: float = 0.5  # As percentage of tool diameter
     pocket_strategy: PocketStrategy = PocketStrategy.HYBRID
     pocket_angle: float = 0.0  # Angle for zigzag paths in radians
-    islands: Optional[List[List[np.ndarray]]] = None  # List of islands for pocket operations
+    islands: Optional[List[Dict[str, Union[List[np.ndarray], float]]]] = None  # List of islands with Z-depths
     start_z: float = 0.0  # Starting Z-level (top of stock)
     pocket_depth: float = 10.0  # Total depth of the pocket
     step_down: float = 2.0  # Depth per pass
@@ -259,9 +259,10 @@ class ToolpathGenerator:
         
         The method generates toolpaths at each Z-level, working from top to bottom:
         1. Calculate Z-levels based on step_down and pocket_depth
-        2. Generate 2D toolpaths at each level
-        3. Add safe transitions between levels
-        4. Include proper entry moves (plunge, ramp, or helix)
+        2. Filter active islands at each Z-level based on their Z-depth range
+        3. Generate 2D toolpaths considering only active islands
+        4. Add safe transitions between levels
+        5. Include proper entry moves (plunge, ramp, or helix)
         
         Returns:
             List of 3D points defining the toolpath
@@ -288,6 +289,20 @@ class ToolpathGenerator:
         
         # Process each Z-level
         for z_level in z_levels:
+            # Filter active islands at this Z-level
+            active_islands = None
+            if self.params.islands:
+                active_islands = []
+                for island in self.params.islands:
+                    if island['z_max'] >= z_level >= island['z_min']:
+                        active_islands.append({
+                            'points': island['points'],
+                            'z_min': island['z_min'],
+                            'z_max': island['z_max']
+                        })
+                if not active_islands:
+                    active_islands = None
+            
             # Generate 2D paths at this level
             paths_2d = []
             
@@ -296,7 +311,7 @@ class ToolpathGenerator:
                 boundary_2d,
                 tool_radius,
                 stepover,
-                self.params.islands
+                active_islands
             )
             
             # Generate zigzag paths if using ZIGZAG or HYBRID strategy
@@ -306,7 +321,7 @@ class ToolpathGenerator:
                     boundary_2d,
                     stepover,
                     self.params.pocket_angle,
-                    self.params.islands
+                    active_islands
                 )
             
             # Combine paths based on strategy
@@ -408,7 +423,7 @@ class ToolpathGenerator:
         boundary: List[np.ndarray],
         tool_radius: float,
         stepover: float,
-        islands: Optional[List[List[np.ndarray]]] = None
+        islands: Optional[List[Dict[str, Union[List[np.ndarray], float]]]] = None
     ) -> List[List[np.ndarray]]:
         """
         Generate boundary following paths for pocket machining.
@@ -430,14 +445,16 @@ class ToolpathGenerator:
         offset_islands = None
         if islands:
             offset_islands = []
-            for island in islands:
-                offset_island = offset_contour(
-                    island,
-                    tool_radius,
-                    OffsetDirection.OUTSIDE
-                )
-                if offset_island:
-                    offset_islands.append(offset_island)
+            for island_info in islands:
+                island = island_info['island']
+                if island is not None:
+                    offset_island = offset_contour(
+                        island,
+                        tool_radius,
+                        OffsetDirection.OUTSIDE
+                    )
+                    if offset_island:
+                        offset_islands.append(offset_island)
         
         for i in range(max_offsets):
             # Generate offset contour
@@ -482,7 +499,7 @@ class ToolpathGenerator:
         boundary: List[np.ndarray],
         stepover: float,
         angle: float,
-        islands: Optional[List[List[np.ndarray]]] = None
+        islands: Optional[List[Dict[str, Union[List[np.ndarray], float]]]] = None
     ) -> List[List[np.ndarray]]:
         """
         Generate zigzag paths for pocket machining.
@@ -506,14 +523,16 @@ class ToolpathGenerator:
         offset_islands = None
         if islands:
             offset_islands = []
-            for island in islands:
-                offset_island = offset_contour(
-                    island,
-                    self.params.tool.diameter / 2.0,
-                    OffsetDirection.OUTSIDE
-                )
-                if offset_island:
-                    offset_islands.append(offset_island)
+            for island_info in islands:
+                island = island_info['island']
+                if island is not None:
+                    offset_island = offset_contour(
+                        island,
+                        self.params.tool.diameter / 2.0,
+                        OffsetDirection.OUTSIDE
+                    )
+                    if offset_island:
+                        offset_islands.append(offset_island)
         
         # Clip paths to boundary and avoid islands
         clipped_paths = []

@@ -1158,5 +1158,236 @@ class TestToolpathGeneration(unittest.TestCase):
             max_deviation = np.max(np.abs(z_diffs - avg_diff))
             self.assertLess(max_deviation, 0.1)  # Z steps should be fairly uniform
 
+    def test_variable_z_depth_islands(self):
+        """Test pocket machining with islands at different Z-depths."""
+        # Create test boundary
+        boundary = [
+            np.array([0.0, 0.0]),
+            np.array([100.0, 0.0]),
+            np.array([100.0, 100.0]),
+            np.array([0.0, 100.0]),
+            np.array([0.0, 0.0])
+        ]
+        
+        # Create islands at different heights
+        islands = [
+            {  # Tall island (full height)
+                'points': [
+                    np.array([20.0, 20.0]),
+                    np.array([30.0, 20.0]),
+                    np.array([30.0, 30.0]),
+                    np.array([20.0, 30.0]),
+                    np.array([20.0, 20.0])
+                ],
+                'z_min': -10.0,  # Bottom of pocket
+                'z_max': 0.0     # Top of stock
+            },
+            {  # Mid-height island
+                'points': [
+                    np.array([60.0, 60.0]),
+                    np.array([80.0, 60.0]),
+                    np.array([70.0, 80.0]),
+                    np.array([60.0, 60.0])
+                ],
+                'z_min': -5.0,   # Starts halfway down
+                'z_max': 0.0     # Top of stock
+            },
+            {  # Short island
+                'points': [
+                    np.array([20.0, 60.0]),
+                    np.array([30.0, 60.0]),
+                    np.array([25.0, 70.0]),
+                    np.array([20.0, 60.0])
+                ],
+                'z_min': -2.0,   # Only near the top
+                'z_max': 0.0     # Top of stock
+            }
+        ]
+        
+        # Set up test parameters
+        self.generator.params.islands = islands
+        self.generator.params.start_z = 0.0
+        self.generator.params.pocket_depth = 10.0
+        self.generator.params.step_down = 2.0
+        
+        # Generate toolpath
+        toolpath = self.generator._generate_pocket_path()
+        
+        # Basic validation
+        self.assertIsNotNone(toolpath)
+        self.assertGreater(len(toolpath), 0)
+        
+        # Get Z-levels where cutting occurs
+        z_levels = sorted(set(p[2] for p in toolpath if p[2] < self.generator.clearance_height))
+        
+        # Test each Z-level
+        for z_level in z_levels:
+            # Get cutting moves at this level
+            level_moves = [p for p in toolpath if p[2] == z_level]
+            
+            # Check against each island
+            for island in islands:
+                # Check if island is active at this level
+                if island['z_max'] >= z_level >= island['z_min']:
+                    # Island is active - points should avoid it
+                    for point in level_moves:
+                        self.assertFalse(
+                            check_point_in_polygon(point[:2], island['points']),
+                            f"Point {point} intersects island at Z={z_level}"
+                        )
+                else:
+                    # Island is not active - area should be machinable
+                    found_point = False
+                    for point in level_moves:
+                        if check_point_in_polygon(point[:2], island['points']):
+                            found_point = True
+                            break
+                    # At least one point should be found inside inactive island area
+                    # (unless covered by another active island)
+                    active_islands = [i for i in islands 
+                                    if i['z_max'] >= z_level >= i['z_min'] and
+                                    any(check_point_in_polygon(p, i['points']) 
+                                        for p in island['points'])]
+                    if not active_islands:
+                        self.assertTrue(
+                            found_point,
+                            f"No points found in inactive island area at Z={z_level}"
+                        )
+                        
+    def test_island_z_transitions(self):
+        """Test transitions when islands appear/disappear at different Z-levels."""
+        # Create test boundary
+        boundary = [
+            np.array([0.0, 0.0]),
+            np.array([50.0, 0.0]),
+            np.array([50.0, 50.0]),
+            np.array([0.0, 50.0]),
+            np.array([0.0, 0.0])
+        ]
+        
+        # Create island that starts at -5.0
+        island = {
+            'points': [
+                np.array([20.0, 20.0]),
+                np.array([30.0, 20.0]),
+                np.array([30.0, 30.0]),
+                np.array([20.0, 30.0]),
+                np.array([20.0, 20.0])
+            ],
+            'z_min': -10.0,  # Bottom of pocket
+            'z_max': -5.0    # Starts halfway down
+        }
+        
+        # Set up test parameters
+        self.generator.params.islands = [island]
+        self.generator.params.start_z = 0.0
+        self.generator.params.pocket_depth = 10.0
+        self.generator.params.step_down = 2.5
+        
+        # Generate toolpath
+        toolpath = self.generator._generate_pocket_path()
+        
+        # Find transitions around Z = -5.0 (where island appears)
+        transitions = []
+        for i in range(len(toolpath) - 1):
+            p1 = toolpath[i]
+            p2 = toolpath[i + 1]
+            if p1[2] > -5.0 > p2[2]:
+                transitions.append((p1, p2))
+        
+        # Should have at least one transition
+        self.assertGreater(len(transitions), 0)
+        
+        # Check that transitions include clearance moves
+        for p1, p2 in transitions:
+            # Find points between p1 and p2 that go to clearance height
+            between_points = []
+            i = toolpath.index(p1)
+            while toolpath[i][2] != p2[2]:
+                between_points.append(toolpath[i])
+                i += 1
+            
+            # Should find at least one clearance height move
+            clearance_moves = [p for p in between_points if p[2] == self.generator.clearance_height]
+            self.assertGreater(len(clearance_moves), 0)
+            
+    def test_overlapping_islands(self):
+        """Test pocket machining with overlapping islands at different Z-depths."""
+        # Create test boundary
+        boundary = [
+            np.array([0.0, 0.0]),
+            np.array([50.0, 0.0]),
+            np.array([50.0, 50.0]),
+            np.array([0.0, 50.0]),
+            np.array([0.0, 0.0])
+        ]
+        
+        # Create overlapping islands
+        islands = [
+            {  # Taller island
+                'points': [
+                    np.array([20.0, 20.0]),
+                    np.array([40.0, 20.0]),
+                    np.array([40.0, 40.0]),
+                    np.array([20.0, 40.0]),
+                    np.array([20.0, 20.0])
+                ],
+                'z_min': -8.0,
+                'z_max': 0.0
+            },
+            {  # Shorter, overlapping island
+                'points': [
+                    np.array([30.0, 10.0]),
+                    np.array([45.0, 10.0]),
+                    np.array([45.0, 30.0]),
+                    np.array([30.0, 30.0]),
+                    np.array([30.0, 10.0])
+                ],
+                'z_min': -4.0,
+                'z_max': 0.0
+            }
+        ]
+        
+        # Set up test parameters
+        self.generator.params.islands = islands
+        self.generator.params.start_z = 0.0
+        self.generator.params.pocket_depth = 10.0
+        self.generator.params.step_down = 2.0
+        
+        # Generate toolpath
+        toolpath = self.generator._generate_pocket_path()
+        
+        # Get Z-levels where cutting occurs
+        z_levels = sorted(set(p[2] for p in toolpath if p[2] < self.generator.clearance_height))
+        
+        # Test each Z-level
+        for z_level in z_levels:
+            # Get cutting moves at this level
+            level_moves = [p for p in toolpath if p[2] == z_level]
+            
+            # Determine active islands at this level
+            active_islands = [island for island in islands 
+                            if island['z_max'] >= z_level >= island['z_min']]
+            
+            # Check that no points intersect active islands
+            for point in level_moves:
+                for island in active_islands:
+                    self.assertFalse(
+                        check_point_in_polygon(point[:2], island['points']),
+                        f"Point {point} intersects active island at Z={z_level}"
+                    )
+            
+            # Special checks for different Z ranges
+            if z_level > -4.0:
+                # Above -4.0: Both islands active
+                self.assertEqual(len(active_islands), 2)
+            elif -8.0 < z_level <= -4.0:
+                # Between -8.0 and -4.0: Only tall island active
+                self.assertEqual(len(active_islands), 1)
+                self.assertEqual(active_islands[0]['z_min'], -8.0)
+            else:
+                # Below -8.0: No islands active
+                self.assertEqual(len(active_islands), 0)
+
 if __name__ == '__main__':
     unittest.main() 
