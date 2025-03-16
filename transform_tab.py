@@ -3,202 +3,13 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                            QRadioButton, QButtonGroup, QLabel,
                            QHBoxLayout, QCheckBox, QGridLayout,
                            QListWidget, QListWidgetItem, QMenu,
-                           QLineEdit, QComboBox, QDialog, QInputDialog,
-                           QDateTimeEdit, QSpinBox, QScrollArea,
-                           QFrame, QToolButton)
-from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
-from PyQt6.QtGui import QIcon
+                           QLineEdit, QComboBox, QDialog,
+                           QInputDialog, QMessageBox, QStatusBar)
+from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, QTimer
+from PyQt6.QtGui import QKeySequence, QShortcut
 import json
 import os
-from typing import Dict, List, Set
-
-class TransformPresetDialog(QDialog):
-    def __init__(self, parent=None, categories: Set[str] = None, tags: Set[str] = None):
-        super().__init__(parent)
-        self.setWindowTitle("Save Transform Preset")
-        self.setMinimumWidth(400)
-        layout = QVBoxLayout(self)
-        
-        # Preset name input
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Enter preset name...")
-        layout.addWidget(QLabel("Preset Name:"))
-        layout.addWidget(self.name_input)
-        
-        # Category selection/creation
-        category_layout = QHBoxLayout()
-        self.category_combo = QComboBox()
-        self.category_combo.setEditable(True)
-        self.category_combo.setInsertPolicy(QComboBox.InsertPolicy.InsertAlphabetically)
-        if categories:
-            self.category_combo.addItems(sorted(categories))
-        self.category_combo.setPlaceholderText("Select or create category...")
-        category_layout.addWidget(QLabel("Category:"))
-        category_layout.addWidget(self.category_combo)
-        layout.addLayout(category_layout)
-        
-        # Tags input
-        tags_layout = QVBoxLayout()
-        tags_layout.addWidget(QLabel("Tags (comma-separated):"))
-        self.tags_input = QLineEdit()
-        self.tags_input.setPlaceholderText("e.g., rotation, precise, custom...")
-        if tags:
-            tag_completer = QCompleter(sorted(tags))
-            tag_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-            self.tags_input.setCompleter(tag_completer)
-        tags_layout.addWidget(self.tags_input)
-        layout.addLayout(tags_layout)
-        
-        # Description input
-        self.desc_input = QLineEdit()
-        self.desc_input.setPlaceholderText("Enter description (optional)...")
-        layout.addWidget(QLabel("Description:"))
-        layout.addWidget(self.desc_input)
-        
-        # Buttons
-        buttons = QHBoxLayout()
-        save_btn = QPushButton("Save")
-        save_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        buttons.addWidget(save_btn)
-        buttons.addWidget(cancel_btn)
-        layout.addLayout(buttons)
-        
-    def getPresetInfo(self):
-        return {
-            'name': self.name_input.text(),
-            'category': self.category_combo.currentText(),
-            'tags': [tag.strip() for tag in self.tags_input.text().split(',') if tag.strip()],
-            'description': self.desc_input.text()
-        }
-
-class PresetManagerDialog(QDialog):
-    def __init__(self, parent=None, presets: Dict = None):
-        super().__init__(parent)
-        self.setWindowTitle("Manage Transform Presets")
-        self.setMinimumSize(600, 400)
-        self.presets = presets or {}
-        self.initUI()
-        
-    def initUI(self):
-        layout = QVBoxLayout(self)
-        
-        # Search and filter
-        filter_layout = QHBoxLayout()
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search presets...")
-        self.search_box.textChanged.connect(self.filterPresets)
-        filter_layout.addWidget(self.search_box)
-        
-        self.category_filter = QComboBox()
-        self.category_filter.addItem("All Categories")
-        self.category_filter.addItems(sorted(self.getCategories()))
-        self.category_filter.currentTextChanged.connect(self.filterPresets)
-        filter_layout.addWidget(self.category_filter)
-        
-        layout.addLayout(filter_layout)
-        
-        # Presets list
-        self.presets_list = QListWidget()
-        self.presets_list.setAlternatingRowColors(True)
-        self.presets_list.itemDoubleClicked.connect(self.editPreset)
-        self.presets_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.presets_list.customContextMenuRequested.connect(self.showPresetContextMenu)
-        layout.addWidget(self.presets_list)
-        
-        # Buttons
-        buttons = QHBoxLayout()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        buttons.addWidget(close_btn)
-        layout.addLayout(buttons)
-        
-        self.updatePresetsList()
-        
-    def getCategories(self) -> Set[str]:
-        return {preset.get('category', 'Uncategorized') 
-                for preset in self.presets.values()}
-                
-    def getTags(self) -> Set[str]:
-        tags = set()
-        for preset in self.presets.values():
-            tags.update(preset.get('tags', []))
-        return tags
-        
-    def filterPresets(self):
-        search_text = self.search_box.text().lower()
-        category = self.category_filter.currentText()
-        
-        self.presets_list.clear()
-        for name, preset in self.presets.items():
-            # Check category filter
-            if category != "All Categories" and preset.get('category') != category:
-                continue
-                
-            # Check search text
-            if search_text:
-                search_target = f"{name} {preset.get('category', '')} {' '.join(preset.get('tags', []))} {preset.get('description', '')}"
-                if search_text not in search_target.lower():
-                    continue
-                    
-            item = QListWidgetItem(f"{name} ({preset.get('category', 'Uncategorized')})")
-            item.setToolTip(f"Tags: {', '.join(preset.get('tags', []))}\nDescription: {preset.get('description', 'No description')}")
-            self.presets_list.addItem(item)
-            
-    def showPresetContextMenu(self, position):
-        menu = QMenu()
-        item = self.presets_list.itemAt(position)
-        if item:
-            preset_name = item.text().split(" (")[0]
-            
-            edit_action = menu.addAction("Edit")
-            edit_action.triggered.connect(lambda: self.editPreset(item))
-            
-            delete_action = menu.addAction("Delete")
-            delete_action.triggered.connect(lambda: self.deletePreset(preset_name))
-            
-            menu.exec(self.presets_list.mapToGlobal(position))
-            
-    def editPreset(self, item):
-        preset_name = item.text().split(" (")[0]
-        preset = self.presets.get(preset_name)
-        if not preset:
-            return
-            
-        dialog = TransformPresetDialog(self, self.getCategories(), self.getTags())
-        dialog.name_input.setText(preset_name)
-        dialog.category_combo.setCurrentText(preset.get('category', ''))
-        dialog.tags_input.setText(', '.join(preset.get('tags', [])))
-        dialog.desc_input.setText(preset.get('description', ''))
-        
-        if dialog.exec():
-            info = dialog.getPresetInfo()
-            new_name = info['name']
-            
-            # Update or rename preset
-            if new_name != preset_name:
-                del self.presets[preset_name]
-                
-            self.presets[new_name] = {
-                **preset,
-                'category': info['category'],
-                'tags': info['tags'],
-                'description': info['description']
-            }
-            
-            self.updatePresetsList()
-            
-    def deletePreset(self, preset_name):
-        if preset_name in self.presets:
-            del self.presets[preset_name]
-            self.updatePresetsList()
-            
-    def updatePresetsList(self):
-        self.category_filter.clear()
-        self.category_filter.addItem("All Categories")
-        self.category_filter.addItems(sorted(self.getCategories()))
-        self.filterPresets()
+from pathlib import Path
 
 class TransformTab(QWidget):
     # Signals
@@ -206,6 +17,7 @@ class TransformTab(QWidget):
     transform_mode_changed = pyqtSignal(str)  # Current transform mode
     snap_settings_changed = pyqtSignal(dict)  # Snapping settings
     axis_changed = pyqtSignal(str)  # Active axis
+    preset_applied = pyqtSignal(dict)  # Emitted when a preset is applied
     
     def __init__(self):
         super().__init__()
@@ -215,14 +27,9 @@ class TransformTab(QWidget):
         self._history = []  # Track transform history
         self._history_index = -1  # Current position in history
         self._grouped_history = []  # Track grouped transforms
-        self._filter_text = ""  # Track search filter
-        self._filter_type = "all"  # Track type filter
-        self._filter_axis = "all"  # Track axis filter
-        self._filter_date_start = None
-        self._filter_date_end = None
-        self._filter_value_min = None
-        self._filter_value_max = None
-        self._presets = self.loadPresets()
+        self._presets = {}  # Store transform presets
+        self._presets_file = Path("transform_presets.json")
+        self.loadPresets()  # Load saved presets
         self.initUI()
         
     def initUI(self):
@@ -250,80 +57,33 @@ class TransformTab(QWidget):
         mode_group.setLayout(mode_layout)
         layout.addWidget(mode_group)
         
-        # History panel with enhanced search and filters
+        # History panel with search and filter
         history_group = QGroupBox("Transform History")
         history_layout = QVBoxLayout()
-        
+
         # Search and filter controls
-        filter_layout = QGridLayout()
+        filter_layout = QHBoxLayout()
         
         # Search box
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search history...")
-        self.search_box.textChanged.connect(self.onSearchTextChanged)
-        self.search_box.setToolTip("Search by transform type, axis, or value")
-        filter_layout.addWidget(self.search_box, 0, 0, 1, 2)
+        self.search_box.textChanged.connect(self.updateHistoryList)
+        filter_layout.addWidget(self.search_box)
         
-        # Transform type filter
-        type_label = QLabel("Type:")
+        # Filter by type
         self.type_filter = QComboBox()
-        self.type_filter.addItems(["All", "Translate", "Rotate", "Scale"])
-        self.type_filter.currentTextChanged.connect(self.onFilterChanged)
-        self.type_filter.setToolTip("Filter by transform type")
-        filter_layout.addWidget(type_label, 1, 0)
-        filter_layout.addWidget(self.type_filter, 1, 1)
+        self.type_filter.addItems(["All Types", "Translate", "Rotate", "Scale"])
+        self.type_filter.currentTextChanged.connect(self.updateHistoryList)
+        filter_layout.addWidget(self.type_filter)
         
-        # Axis filter
-        axis_label = QLabel("Axis:")
+        # Filter by axis
         self.axis_filter = QComboBox()
-        self.axis_filter.addItems(["All", "X", "Y", "Z"])
-        self.axis_filter.currentTextChanged.connect(self.onFilterChanged)
-        self.axis_filter.setToolTip("Filter by axis")
-        filter_layout.addWidget(axis_label, 2, 0)
-        filter_layout.addWidget(self.axis_filter, 2, 1)
-        
-        # Date range filter
-        date_label = QLabel("Date Range:")
-        filter_layout.addWidget(date_label, 3, 0)
-        date_layout = QHBoxLayout()
-        
-        self.date_start = QDateTimeEdit()
-        self.date_start.setCalendarPopup(True)
-        self.date_start.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.date_start.dateTimeChanged.connect(lambda: self.onFilterChanged("date"))
-        
-        self.date_end = QDateTimeEdit()
-        self.date_end.setCalendarPopup(True)
-        self.date_end.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.date_end.setDateTime(QDateTime.currentDateTime())
-        self.date_end.dateTimeChanged.connect(lambda: self.onFilterChanged("date"))
-        
-        date_layout.addWidget(self.date_start)
-        date_layout.addWidget(QLabel("to"))
-        date_layout.addWidget(self.date_end)
-        filter_layout.addLayout(date_layout, 3, 1)
-        
-        # Value range filter
-        value_label = QLabel("Value Range:")
-        filter_layout.addWidget(value_label, 4, 0)
-        value_layout = QHBoxLayout()
-        
-        self.value_min = QDoubleSpinBox()
-        self.value_min.setRange(-1000, 1000)
-        self.value_min.valueChanged.connect(lambda: self.onFilterChanged("value"))
-        
-        self.value_max = QDoubleSpinBox()
-        self.value_max.setRange(-1000, 1000)
-        self.value_max.setValue(1000)
-        self.value_max.valueChanged.connect(lambda: self.onFilterChanged("value"))
-        
-        value_layout.addWidget(self.value_min)
-        value_layout.addWidget(QLabel("to"))
-        value_layout.addWidget(self.value_max)
-        filter_layout.addLayout(value_layout, 4, 1)
+        self.axis_filter.addItems(["All Axes", "X", "Y", "Z"])
+        self.axis_filter.currentTextChanged.connect(self.updateHistoryList)
+        filter_layout.addWidget(self.axis_filter)
         
         history_layout.addLayout(filter_layout)
-        
+
         # History list widget with enhanced functionality
         self.history_list = QListWidget()
         self.history_list.setMaximumHeight(150)
@@ -334,69 +94,31 @@ class TransformTab(QWidget):
         self.history_list.setToolTip("Double-click to restore a transform state\nRight-click for more options")
         history_layout.addWidget(self.history_list)
         
-        # Undo/Redo buttons with tooltips
-        undo_redo_layout = QHBoxLayout()
+        # Undo/Redo and group controls
+        controls_layout = QHBoxLayout()
         
         self.undo_button = QPushButton("Undo (Ctrl+Z)")
         self.undo_button.setToolTip("Undo last transform")
         self.undo_button.clicked.connect(self.undoTransform)
         self.undo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.undo_button)
+        controls_layout.addWidget(self.undo_button)
         
         self.redo_button = QPushButton("Redo (Ctrl+Y)")
         self.redo_button.setToolTip("Redo last undone transform")
         self.redo_button.clicked.connect(self.redoTransform)
         self.redo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.redo_button)
+        controls_layout.addWidget(self.redo_button)
         
-        history_layout.addLayout(undo_redo_layout)
+        # Group transforms button
+        self.group_button = QPushButton("Group Selected")
+        self.group_button.setToolTip("Group selected transforms together")
+        self.group_button.clicked.connect(self.groupSelectedTransforms)
+        self.group_button.setEnabled(False)
+        controls_layout.addWidget(self.group_button)
         
-        # Presets controls with categories
-        presets_group = QGroupBox("Transform Presets")
-        presets_layout = QVBoxLayout()
-        
-        # Category and preset selection
-        selection_layout = QGridLayout()
-        
-        # Category filter
-        category_label = QLabel("Category:")
-        self.category_filter = QComboBox()
-        self.updateCategoryFilter()
-        self.category_filter.currentTextChanged.connect(self.onCategoryChanged)
-        selection_layout.addWidget(category_label, 0, 0)
-        selection_layout.addWidget(self.category_filter, 0, 1)
-        
-        # Preset selection
-        preset_label = QLabel("Preset:")
-        self.preset_combo = QComboBox()
-        self.updatePresetCombo()
-        self.preset_combo.setToolTip("Select a saved transform preset")
-        selection_layout.addWidget(preset_label, 1, 0)
-        selection_layout.addWidget(self.preset_combo, 1, 1)
-        
-        presets_layout.addLayout(selection_layout)
-        
-        # Preset actions
-        actions_layout = QHBoxLayout()
-        
-        load_preset_btn = QPushButton("Load (Ctrl+L)")
-        load_preset_btn.setToolTip("Load selected transform preset")
-        load_preset_btn.clicked.connect(self.loadSelectedPreset)
-        actions_layout.addWidget(load_preset_btn)
-        
-        save_preset_btn = QPushButton("Save (Ctrl+S)")
-        save_preset_btn.setToolTip("Save current transform as preset")
-        save_preset_btn.clicked.connect(self.saveCurrentAsPreset)
-        actions_layout.addWidget(save_preset_btn)
-        
-        manage_presets_btn = QPushButton("Manage...")
-        manage_presets_btn.setToolTip("Manage transform presets")
-        manage_presets_btn.clicked.connect(self.showPresetManager)
-        actions_layout.addWidget(manage_presets_btn)
-        
-        presets_layout.addLayout(actions_layout)
-        presets_group.setLayout(presets_layout)
-        layout.addWidget(presets_group)
+        history_layout.addLayout(controls_layout)
+        history_group.setLayout(history_layout)
+        layout.addWidget(history_group)
         
         # Transform mode options
         options_group = QGroupBox("Options")
@@ -453,6 +175,47 @@ class TransformTab(QWidget):
         snap_group.setLayout(snap_layout)
         layout.addWidget(snap_group)
         
+        # Transform presets
+        presets_group = QGroupBox("Transform Presets")
+        presets_layout = QVBoxLayout()
+        
+        # Preset controls
+        preset_controls = QHBoxLayout()
+        
+        # Preset selection combo box
+        self.preset_combo = QComboBox()
+        self.preset_combo.setToolTip("Select a saved transform preset (Ctrl+L to load)")
+        self.updatePresetCombo()
+        preset_controls.addWidget(self.preset_combo)
+        
+        # Load preset button
+        load_preset_btn = QPushButton("Load (Ctrl+L)")
+        load_preset_btn.setToolTip("Load selected preset (Ctrl+L)")
+        load_preset_btn.clicked.connect(self.loadSelectedPreset)
+        preset_controls.addWidget(load_preset_btn)
+        
+        # Save preset button
+        save_preset_btn = QPushButton("Save (Ctrl+S)")
+        save_preset_btn.setToolTip("Save current transform as preset (Ctrl+S)")
+        save_preset_btn.clicked.connect(self.savePreset)
+        preset_controls.addWidget(save_preset_btn)
+        
+        # Manage presets button
+        manage_presets_btn = QPushButton("Manage (Ctrl+M)")
+        manage_presets_btn.setToolTip("Manage saved presets (Ctrl+M)")
+        manage_presets_btn.clicked.connect(self.managePresets)
+        preset_controls.addWidget(manage_presets_btn)
+        
+        presets_layout.addLayout(preset_controls)
+        
+        # Status bar for temporary messages
+        self.status_bar = QStatusBar()
+        self.status_bar.setSizeGripEnabled(False)
+        presets_layout.addWidget(self.status_bar)
+        
+        presets_group.setLayout(presets_layout)
+        layout.addWidget(presets_group)
+        
         # Apply button with tooltip
         apply_button = QPushButton("Apply Transform (Enter)")
         apply_button.setToolTip("Apply the current transformation (Enter)")
@@ -468,6 +231,26 @@ class TransformTab(QWidget):
         
         # Emit initial settings
         self.onSnapSettingsChanged()
+        
+        # Add keyboard shortcuts
+        QShortcut(QKeySequence("Ctrl+G"), self, self.groupSelectedTransforms)
+        QShortcut(QKeySequence("Ctrl+U"), self, self.ungroupSelectedTransforms)
+        
+        # Add keyboard shortcuts for transform presets
+        # Save preset shortcut (Ctrl+S)
+        self.save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+        self.save_shortcut.activated.connect(self.savePreset)
+        self.save_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        
+        # Load preset shortcut (Ctrl+L)
+        self.load_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        self.load_shortcut.activated.connect(self.loadSelectedPreset)
+        self.load_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        
+        # Manage presets shortcut (Ctrl+M)
+        self.manage_shortcut = QShortcut(QKeySequence("Ctrl+M"), self)
+        self.manage_shortcut.activated.connect(self.managePresets)
+        self.manage_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         
     def setActiveAxis(self, axis):
         """Set the active axis."""
@@ -615,7 +398,8 @@ class TransformTab(QWidget):
         transform_info = {
             'type': transform_type,
             'params': parameters.copy(),
-            'timestamp': QDateTime.currentDateTime()
+            'timestamp': QDateTime.currentDateTime(),
+            'group_id': None  # For transform grouping
         }
         self._history.append(transform_info)
         self._history_index += 1
@@ -631,19 +415,30 @@ class TransformTab(QWidget):
         self.history_list.clear()
         current_group = None
         group_items = []
-        visible_indices = []  # Track which items are visible
+        
+        search_text = self.search_box.text().lower()
+        type_filter = self.type_filter.currentText()
+        axis_filter = self.axis_filter.currentText()
         
         for i, transform in enumerate(self._history):
-            # Check if transform should be shown
-            if not self.shouldShowTransform(transform):
+            # Apply filters
+            if type_filter != "All Types" and transform['params']['mode'].capitalize() != type_filter:
                 continue
                 
-            visible_indices.append(i)
+            if axis_filter != "All Axes" and transform['params']['axis'].upper() != axis_filter:
+                continue
+                
             timestamp = transform['timestamp'].toString('hh:mm:ss')
             mode = transform['params']['mode']
             axis = transform['params']['axis']
             value = transform['params'].get('value', 0)
             relative = "Relative" if transform['params'].get('relative_mode', False) else "Absolute"
+            
+            item_text = f"{timestamp} - {mode.capitalize()} {axis.upper()}: {value:.2f} ({relative})"
+            
+            # Apply search filter
+            if search_text and search_text not in item_text.lower():
+                continue
             
             if transform['group_id'] != current_group:
                 # If we have a previous group, add it
@@ -652,7 +447,6 @@ class TransformTab(QWidget):
                     group_items = []
                 current_group = transform['group_id']
             
-            item_text = f"{timestamp} - {mode.capitalize()} {axis.upper()}: {value:.2f} ({relative})"
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, i)  # Store history index
             
@@ -673,77 +467,33 @@ class TransformTab(QWidget):
         # Update group button state
         self.group_button.setEnabled(len(self.history_list.selectedItems()) > 1)
             
-        # Scroll to current position if visible
-        if self._history_index in visible_indices:
-            for i in range(self.history_list.count()):
-                item = self.history_list.item(i)
-                if item.data(Qt.ItemDataRole.UserRole) == self._history_index:
+        # Scroll to current position
+        if self._history_index >= 0:
+            visible_items = [self.history_list.item(i) for i in range(self.history_list.count())]
+            for item in visible_items:
+                if isinstance(item.data(Qt.ItemDataRole.UserRole), int) and item.data(Qt.ItemDataRole.UserRole) == self._history_index:
                     self.history_list.scrollToItem(item)
                     break
-                    
-    def shouldShowTransform(self, transform):
-        """Check if a transform should be shown based on current filters."""
-        # Check text filter
-        if self._filter_text:
-            text = f"{transform['params']['mode']} {transform['params']['axis']} {transform['params'].get('value', 0)}"
-            if self._filter_text not in text.lower():
-                return False
-                
-        # Check type filter
-        if self._filter_type != "all" and transform['params']['mode'] != self._filter_type:
-            return False
+
+    def addGroupToList(self, items):
+        """Add a group of items to the history list."""
+        if not items:
+            return
             
-        # Check axis filter
-        if self._filter_axis != "all" and transform['params']['axis'] != self._filter_axis.lower():
-            return False
-            
-        # Date range filter
-        if self._filter_date_start and self._filter_date_end:
-            transform_date = transform['timestamp']
-            if not (self._filter_date_start <= transform_date <= self._filter_date_end):
-                return False
-                
-        # Value range filter
-        if self._filter_value_min is not None and self._filter_value_max is not None:
-            value = transform['params'].get('value', 0)
-            if not (self._filter_value_min <= value <= self._filter_value_max):
-                return False
-                
-        return True
+        # Create group item
+        first = items[0]
+        last = items[-1]
+        group_text = f"Group: {len(items)} transforms"
+        group_item = QListWidgetItem(group_text)
+        group_item.setData(Qt.ItemDataRole.UserRole, [item.data(Qt.ItemDataRole.UserRole) for item in items])
         
-    def onSearchTextChanged(self, text):
-        """Handle search text changes."""
-        self._filter_text = text.lower()
-        self.updateHistoryList()
+        # Style group item
+        font = group_item.font()
+        font.setBold(True)
+        group_item.setFont(font)
+        group_item.setBackground(Qt.GlobalColor.lightGray)
         
-    def onFilterChanged(self, source=None):
-        """Handle filter changes."""
-        if source == "date":
-            self._filter_date_start = self.date_start.dateTime()
-            self._filter_date_end = self.date_end.dateTime()
-        elif source == "value":
-            self._filter_value_min = self.value_min.value()
-            self._filter_value_max = self.value_max.value()
-        else:
-            if self.sender() == self.type_filter:
-                self._filter_type = self.type_filter.currentText().lower()
-            elif self.sender() == self.axis_filter:
-                self._filter_axis = self.axis_filter.currentText().lower()
-        self.updateHistoryList()
-        
-    def clearFilters(self):
-        """Clear all filters and search text."""
-        self.search_box.clear()
-        self.type_filter.setCurrentText("All")
-        self.axis_filter.setCurrentText("All")
-        self._filter_text = ""
-        self._filter_type = "all"
-        self._filter_axis = "all"
-        self._filter_date_start = None
-        self._filter_date_end = None
-        self._filter_value_min = None
-        self._filter_value_max = None
-        self.updateHistoryList()
+        self.history_list.addItem(group_item)
         
     def showHistoryContextMenu(self, position):
         """Show context menu for history items."""
@@ -751,36 +501,73 @@ class TransformTab(QWidget):
         
         # Get item at position
         item = self.history_list.itemAt(position)
-        
-        # Add filter-related actions
-        clear_filters = menu.addAction("Clear Filters")
-        clear_filters.triggered.connect(self.clearFilters)
-        
-        # Add preset-related actions
-        menu.addSeparator()
-        if item:
-            save_as_preset = menu.addAction("Save as Preset")
-            save_as_preset.triggered.connect(lambda: self.saveTransformAsPreset(item))
+        if not item:
+            return
             
-        load_preset = menu.addAction("Load Preset")
-        load_preset.triggered.connect(self.loadSelectedPreset)
+        # Add menu actions
+        restore_action = menu.addAction("Restore This State")
+        restore_action.triggered.connect(lambda: self.onHistoryItemDoubleClicked(item))
         
-        menu.addSeparator()
-        
-        # Add existing item-specific actions
-        if item:
-            restore_action = menu.addAction("Restore This State")
-            restore_action.triggered.connect(lambda: self.onHistoryItemDoubleClicked(item))
+        if len(self.history_list.selectedItems()) > 1:
+            group_action = menu.addAction("Group Selected (Ctrl+G)")
+            group_action.triggered.connect(self.groupSelectedTransforms)
             
-            if len(self.history_list.selectedItems()) > 1:
-                group_action = menu.addAction("Group Selected (Ctrl+Shift+G)")
-                group_action.triggered.connect(self.groupSelectedTransforms)
-                
-            if isinstance(item.data(Qt.ItemDataRole.UserRole), list):
-                ungroup_action = menu.addAction("Ungroup (Ctrl+Shift+U)")
-                ungroup_action.triggered.connect(lambda: self.ungroupTransforms(item))
-                
+        if isinstance(item.data(Qt.ItemDataRole.UserRole), list):
+            ungroup_action = menu.addAction("Ungroup (Ctrl+U)")
+            ungroup_action.triggered.connect(lambda: self.ungroupTransforms(item))
+            
         menu.exec(self.history_list.mapToGlobal(position))
+        
+    def onHistoryItemDoubleClicked(self, item):
+        """Handle double-clicking on a history item."""
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(index, list):
+            # Group item - restore to last transform in group
+            index = index[-1]
+            
+        if index == self._history_index:
+            return
+            
+        # Determine if we're undoing or redoing
+        if index < self._history_index:
+            # Undo operations until we reach the clicked index
+            while self._history_index > index:
+                self.undoTransform()
+        else:
+            # Redo operations until we reach the clicked index
+            while self._history_index < index:
+                self.redoTransform()
+                
+    def groupSelectedTransforms(self):
+        """Group selected transforms together."""
+        selected_items = self.history_list.selectedItems()
+        if len(selected_items) < 2:
+            return
+            
+        # Generate new group ID
+        group_id = len(self._grouped_history)
+        self._grouped_history.append([])
+        
+        # Update group IDs in history
+        for item in selected_items:
+            index = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(index, int):
+                self._history[index]['group_id'] = group_id
+                self._grouped_history[group_id].append(index)
+                
+        self.updateHistoryList()
+        
+    def ungroupTransforms(self, group_item):
+        """Ungroup a set of transforms."""
+        indices = group_item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(indices, list):
+            return
+            
+        # Remove group IDs
+        for index in indices:
+            self._history[index]['group_id'] = None
+            
+        self.updateHistoryList()
         
     def updateUndoRedoState(self):
         """Update the enabled state of undo/redo buttons."""
@@ -805,184 +592,212 @@ class TransformTab(QWidget):
             self.updateUndoRedoState()
             # Emit signal to main window
             self.transform_applied.emit("redo", transform['params'])
-            
-    def onHistoryItemDoubleClicked(self, item):
-        """Handle clicking on a history item."""
-        index = self.history_list.row(item)
-        if index == self._history_index:
-            return
-            
-        # Determine if we're undoing or redoing
-        if index < self._history_index:
-            # Undo operations until we reach the clicked index
-            while self._history_index > index:
-                self.undoTransform()
-        else:
-            # Redo operations until we reach the clicked index
-            while self._history_index < index:
-                self.redoTransform()
+
+    def ungroupSelectedTransforms(self):
+        """Ungroup selected transforms."""
+        selected_items = self.history_list.selectedItems()
+        for item in selected_items:
+            if isinstance(item.data(Qt.ItemDataRole.UserRole), list):
+                self.ungroupTransforms(item)
 
     def loadPresets(self):
         """Load transform presets from file."""
-        presets_file = os.path.join(os.path.dirname(__file__), "transform_presets.json")
-        if os.path.exists(presets_file):
-            try:
-                with open(presets_file, 'r') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
-        
-    def savePresets(self):
+        try:
+            if self._presets_file.exists():
+                with open(self._presets_file, 'r') as f:
+                    self._presets = json.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to load presets: {str(e)}")
+            self._presets = {}
+
+    def savePresetsToFile(self):
         """Save transform presets to file."""
-        presets_file = os.path.join(os.path.dirname(__file__), "transform_presets.json")
-        with open(presets_file, 'w') as f:
-            json.dump(self._presets, f, indent=2)
-            
+        try:
+            with open(self._presets_file, 'w') as f:
+                json.dump(self._presets, f, indent=2)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to save presets: {str(e)}")
+
     def updatePresetCombo(self):
-        """Update the presets combo box."""
+        """Update the preset combo box with current presets."""
         self.preset_combo.clear()
-        self.preset_combo.addItems(self._presets.keys())
+        self.preset_combo.addItem("Select Preset...")
+        for name in sorted(self._presets.keys()):
+            self.preset_combo.addItem(name)
+
+    def getCurrentTransform(self):
+        """Get current transform settings."""
+        transform = {
+            'mode': self.getCurrentMode(),
+            'axis': self.getCurrentAxis(),
+            'relative_mode': self._relative_mode,
+            'snap_settings': self.getCurrentSnapSettings()
+        }
         
-    def saveCurrentAsPreset(self):
+        # Get parameter value based on mode
+        for i in range(self.params_layout.rowCount()):
+            label_item = self.params_layout.itemAt(i * 2).widget()
+            spin_box = self.params_layout.itemAt(i * 2 + 1).widget()
+            if isinstance(label_item, QLabel) and isinstance(spin_box, QDoubleSpinBox):
+                transform['value'] = spin_box.value()
+                transform['param_name'] = label_item.text()
+                break
+        
+        return transform
+
+    def showStatusMessage(self, message, timeout=2000):
+        """Show a temporary status message."""
+        self.status_bar.showMessage(message, timeout)
+
+    def savePreset(self):
         """Save current transform settings as a preset."""
-        dialog = TransformPresetDialog(
-            self,
-            categories={p.get('category', 'Uncategorized') for p in self._presets.values()},
-            tags={tag for p in self._presets.values() for tag in p.get('tags', [])}
+        name, ok = QInputDialog.getText(
+            self, "Save Preset (Ctrl+S)",
+            "Enter preset name:",
+            QLineEdit.EchoMode.Normal
         )
         
-        if dialog.exec():
-            info = dialog.getPresetInfo()
-            name = info['name']
-            if not name:
-                return
-                
-            # Get current transform settings
-            preset = {
-                'mode': self._current_mode,
-                'axis': self._active_axis,
-                'relative': self._relative_mode,
-                'snap': self.getSnapSettings(),
-                'category': info['category'],
-                'tags': info['tags'],
-                'description': info['description'],
-                'timestamp': QDateTime.currentDateTime().toString()
+        if ok and name:
+            if name in self._presets:
+                reply = QMessageBox.question(
+                    self, "Overwrite Preset",
+                    f"Preset '{name}' already exists. Overwrite?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+            
+            # Save current transform settings
+            self._presets[name] = {
+                'transform': self.getCurrentTransform(),
+                'created': QDateTime.currentDateTime().toString(),
+                'last_modified': QDateTime.currentDateTime().toString()
             }
             
-            self._presets[name] = preset
-            self.savePresets()
-            self.updateCategoryFilter()
+            self.savePresetsToFile()
             self.updatePresetCombo()
+            self.preset_combo.setCurrentText(name)
             
+            self.showStatusMessage(f"Preset '{name}' saved successfully! (Ctrl+S to save presets)")
+
     def loadSelectedPreset(self):
         """Load the selected preset."""
-        name = self.preset_combo.currentText()
-        if not name or name not in self._presets:
+        preset_name = self.preset_combo.currentText()
+        if preset_name == "Select Preset..." or preset_name not in self._presets:
+            self.showStatusMessage("No valid preset selected! (Use Ctrl+L to load)")
             return
             
-        preset = self._presets[name]
+        preset = self._presets[preset_name]['transform']
         
-        # Apply preset settings
-        if preset['mode']:
-            self.setCurrentMode(preset['mode'])
-        if preset['axis']:
-            self.setActiveAxis(preset['axis'])
-            
-        self.relative_mode.setChecked(preset['relative'])
+        # Apply transform settings
+        self.setCurrentMode(preset['mode'])
+        self.setActiveAxis(preset['axis'])
+        self.relative_mode.setChecked(preset['relative_mode'])
         
-        snap = preset['snap']
-        self.snap_enabled.setChecked(snap['enabled'])
-        self.snap_translate.setValue(snap['translate'])
-        self.snap_rotate.setValue(snap['rotate'])
-        self.snap_scale.setValue(snap['scale'])
+        # Apply snap settings
+        snap_settings = preset['snap_settings']
+        self.snap_enabled.setChecked(snap_settings['enabled'])
+        self.snap_translate.setValue(snap_settings['translate'])
+        self.snap_rotate.setValue(snap_settings['rotate'])
+        self.snap_scale.setValue(snap_settings['scale'])
         
-    def saveTransformAsPreset(self, item):
-        """Save a specific transform as a preset."""
-        index = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(index, int) and 0 <= index < len(self._history):
-            transform = self._history[index]
-            
-            dialog = TransformPresetDialog(
-                self,
-                categories={p.get('category', 'Uncategorized') for p in self._presets.values()},
-                tags={tag for p in self._presets.values() for tag in p.get('tags', [])}
-            )
-            
-            if dialog.exec():
-                info = dialog.getPresetInfo()
-                name = info['name']
-                if not name:
-                    return
-                    
-                preset = {
-                    'mode': transform['params']['mode'],
-                    'axis': transform['params']['axis'],
-                    'relative': transform['params'].get('relative_mode', False),
-                    'snap': transform['params'].get('snap', self.getSnapSettings()),
-                    'category': info['category'],
-                    'tags': info['tags'],
-                    'description': info['description'],
-                    'timestamp': transform['timestamp'].toString()
-                }
-                
-                self._presets[name] = preset
-                self.savePresets()
-                self.updateCategoryFilter()
-                self.updatePresetCombo()
+        # Set parameter value
+        for i in range(self.params_layout.rowCount()):
+            label_item = self.params_layout.itemAt(i * 2).widget()
+            spin_box = self.params_layout.itemAt(i * 2 + 1).widget()
+            if isinstance(label_item, QLabel) and isinstance(spin_box, QDoubleSpinBox):
+                if label_item.text() == preset['param_name']:
+                    spin_box.setValue(preset['value'])
+                    break
+        
+        # Emit signal that preset was applied
+        self.preset_applied.emit(preset)
+        self.showStatusMessage(f"Preset '{preset_name}' loaded! (Ctrl+L to load)")
 
-    def updateCategoryFilter(self):
-        """Update the category filter combo box."""
-        current = self.category_filter.currentText()
-        self.category_filter.clear()
-        self.category_filter.addItem("All Categories")
-        categories = {preset.get('category', 'Uncategorized') 
-                     for preset in self._presets.values()}
-        self.category_filter.addItems(sorted(categories))
+    def managePresets(self):
+        """Show dialog to manage presets."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Presets (Ctrl+M)")
+        layout = QVBoxLayout(dialog)
         
-        # Restore previous selection if valid
-        index = self.category_filter.findText(current)
-        if index >= 0:
-            self.category_filter.setCurrentIndex(index)
+        # Help text
+        help_label = QLabel("Keyboard Shortcuts:\n" +
+                          "• Ctrl+S: Save preset\n" +
+                          "• Ctrl+L: Load selected preset\n" +
+                          "• Ctrl+M: Open this dialog")
+        help_label.setStyleSheet("color: gray;")
+        layout.addWidget(help_label)
+        
+        # Preset list
+        preset_list = QListWidget()
+        preset_list.addItems(sorted(self._presets.keys()))
+        layout.addWidget(preset_list)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        rename_btn = QPushButton("Rename")
+        rename_btn.clicked.connect(lambda: self.renamePreset(preset_list))
+        button_layout.addWidget(rename_btn)
+        
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(lambda: self.deletePreset(preset_list))
+        button_layout.addWidget(delete_btn)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        dialog.exec()
+
+    def renamePreset(self, preset_list):
+        """Rename selected preset."""
+        current_item = preset_list.currentItem()
+        if not current_item:
+            self.showStatusMessage("No preset selected!")
+            return
             
-    def onCategoryChanged(self, category: str):
-        """Handle category filter changes."""
-        self.updatePresetCombo(category)
+        old_name = current_item.text()
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Preset",
+            "Enter new name:",
+            QLineEdit.EchoMode.Normal,
+            old_name
+        )
         
-    def updatePresetCombo(self, category: str = None):
-        """Update the presets combo box with optional category filter."""
-        self.preset_combo.clear()
-        
-        for name, preset in self._presets.items():
-            preset_category = preset.get('category', 'Uncategorized')
-            if category in (None, "All Categories") or preset_category == category:
-                self.preset_combo.addItem(name)
+        if ok and new_name and new_name != old_name:
+            if new_name in self._presets:
+                QMessageBox.warning(
+                    self, "Error",
+                    f"Preset '{new_name}' already exists!"
+                )
+                return
                 
-    def showPresetManager(self):
-        """Show the preset manager dialog."""
-        dialog = PresetManagerDialog(self, self._presets)
-        if dialog.exec():
-            self.savePresets()
-            self.updateCategoryFilter()
+            self._presets[new_name] = self._presets.pop(old_name)
+            self._presets[new_name]['last_modified'] = QDateTime.currentDateTime().toString()
+            self.savePresetsToFile()
             self.updatePresetCombo()
+            preset_list.currentItem().setText(new_name)
+            self.showStatusMessage(f"Preset renamed from '{old_name}' to '{new_name}'")
+
+    def deletePreset(self, preset_list):
+        """Delete selected preset."""
+        current_item = preset_list.currentItem()
+        if not current_item:
+            self.showStatusMessage("No preset selected!")
+            return
             
-    def onCategoryChanged(self, category: str):
-        """Handle category filter changes."""
-        self.updatePresetCombo(category)
+        name = current_item.text()
+        reply = QMessageBox.question(
+            self, "Delete Preset",
+            f"Are you sure you want to delete preset '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
         
-    def updatePresetCombo(self, category: str = None):
-        """Update the presets combo box with optional category filter."""
-        self.preset_combo.clear()
-        
-        for name, preset in self._presets.items():
-            preset_category = preset.get('category', 'Uncategorized')
-            if category in (None, "All Categories") or preset_category == category:
-                self.preset_combo.addItem(name)
-                
-    def showPresetManager(self):
-        """Show the preset manager dialog."""
-        dialog = PresetManagerDialog(self, self._presets)
-        if dialog.exec():
-            self.savePresets()
-            self.updateCategoryFilter()
-            self.updatePresetCombo() 
+        if reply == QMessageBox.StandardButton.Yes:
+            del self._presets[name]
+            self.savePresetsToFile()
+            self.updatePresetCombo()
+            preset_list.takeItem(preset_list.row(current_item))
+            self.showStatusMessage(f"Preset '{name}' deleted") 
