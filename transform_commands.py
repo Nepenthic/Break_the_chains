@@ -1,5 +1,6 @@
-from PyQt6.QtCore import pyqtSignal, QObject
+from PyQt6.QtCore import pyqtSignal, QObject, QVector3D
 import numpy as np
+import math
 
 class TransformCommand:
     """Command class for transform operations."""
@@ -10,6 +11,47 @@ class TransformCommand:
         self.before_states = before_states
         self.after_states = after_states
         self.transform_params = transform_params
+    
+    def validate_states(self):
+        """Validate the transform states before applying them."""
+        try:
+            # Check if we have valid states
+            if not self.before_states or not self.after_states:
+                return False
+                
+            # Validate each shape's states
+            for shape, before, after in zip(self.shapes, self.before_states, self.after_states):
+                # Check position
+                if not isinstance(before['position'], QVector3D) or not isinstance(after['position'], QVector3D):
+                    return False
+                    
+                # Check rotation
+                if not isinstance(before['rotation'], QVector3D) or not isinstance(after['rotation'], QVector3D):
+                    return False
+                    
+                # Check scale (must be positive)
+                if not isinstance(before['scale'], QVector3D) or not isinstance(after['scale'], QVector3D):
+                    return False
+                    
+                # Validate scale values
+                for scale in [before['scale'], after['scale']]:
+                    if scale.x() <= 0 or scale.y() <= 0 or scale.z() <= 0:
+                        return False
+                        
+                # Check for NaN or infinite values
+                for state in [before, after]:
+                    for key in ['position', 'rotation', 'scale']:
+                        vec = state[key]
+                        if (math.isnan(vec.x()) or math.isnan(vec.y()) or math.isnan(vec.z()) or
+                            math.isinf(vec.x()) or math.isinf(vec.y()) or math.isinf(vec.z())):
+                            return False
+                            
+            return True
+            
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.error(f"State validation error: {str(e)}")
+            return False
     
     def undo(self):
         """Revert shapes to their pre-transform states."""

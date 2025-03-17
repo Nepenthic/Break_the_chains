@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                            QGroupBox, QFormLayout, QDoubleSpinBox,
-                           QComboBox, QLabel)
+                           QComboBox, QLabel, QSpinBox)
 from PyQt6.QtCore import Qt, pyqtSignal
 
 class ShapesTab(QWidget):
@@ -19,7 +19,7 @@ class ShapesTab(QWidget):
         shape_type_layout = QVBoxLayout()
         
         self.shape_type = QComboBox()
-        self.shape_type.addItems(["Cube", "Sphere", "Cylinder", "Cone"])
+        self.shape_type.addItems(["Cube", "Sphere", "Cylinder", "Cone", "Extrusion"])
         self.shape_type.currentTextChanged.connect(self.onShapeTypeChanged)
         
         shape_type_layout.addWidget(self.shape_type)
@@ -66,6 +66,19 @@ class ShapesTab(QWidget):
         self.addParameter("Height", 2.0)
         self.addParameter("Segments", 32.0)
         
+    def setupExtrusionParams(self):
+        self.clearParams()
+        # Add integer spinbox for number of sides
+        sides_spin = QSpinBox()
+        sides_spin.setRange(3, 100)
+        sides_spin.setValue(6)
+        sides_spin.setSingleStep(1)
+        self.params_layout.addRow("Sides", sides_spin)
+        
+        # Add double spinboxes for radius and height
+        self.addParameter("Radius", 1.0)
+        self.addParameter("Height", 2.0)
+        
     def clearParams(self):
         while self.params_layout.count():
             child = self.params_layout.takeAt(0)
@@ -88,15 +101,20 @@ class ShapesTab(QWidget):
             self.setupCylinderParams()
         elif shape_type == "Cone":
             self.setupConeParams()
+        elif shape_type == "Extrusion":
+            self.setupExtrusionParams()
             
     def createShape(self):
         # Collect parameters
         params = {}
         for i in range(self.params_layout.rowCount()):
             label_item = self.params_layout.itemAt(i * 2).widget()
-            spin_box = self.params_layout.itemAt(i * 2 + 1).widget()
-            if isinstance(label_item, QLabel) and isinstance(spin_box, QDoubleSpinBox):
-                params[label_item.text()] = spin_box.value()
+            value_widget = self.params_layout.itemAt(i * 2 + 1).widget()
+            if isinstance(label_item, QLabel):
+                if isinstance(value_widget, QDoubleSpinBox):
+                    params[label_item.text()] = value_widget.value()
+                elif isinstance(value_widget, QSpinBox):
+                    params[label_item.text()] = value_widget.value()
                 
         # Emit signal with shape type and parameters
         self.shape_created.emit(self.shape_type.currentText(), params) 

@@ -11,6 +11,7 @@ from src.core.utils import (
     qmatrix4x4_to_numpy
 )
 import math
+import logging
 
 class TransformPreviewOverlay:
     """Manages transform preview visualization in the viewport."""
@@ -199,6 +200,7 @@ class Viewport(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.logger = logging.getLogger(__name__)
         self.shapes = {}
         self.selected_shapes = set()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
