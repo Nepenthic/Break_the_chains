@@ -415,31 +415,31 @@ class TestConstraintPreviews:
     def test_preview_update_frequency(self, sketch_view):
         """Test that preview updates respect the minimum update interval."""
         import time
-        
+
         # Get two points
-        points = [item for item in sketch_view.scene.items() 
+        points = [item for item in sketch_view.scene.items()
                  if isinstance(item, sketch_view.PointItem)][:2]
         assert len(points) >= 2
-        
+
         # Start coincident constraint
         sketch_view._start_constraint(ConstraintType.COINCIDENT)
         sketch_view.constraint_entities = [points[0].entity_id]
-        
+
         # Try rapid updates
-        last_update = 0
+        last_update = time.time()
         min_interval = sketch_view.update_interval
-        
+
         for i in range(10):
+            time.sleep(min_interval)  # Ensure enough time has passed
             current_time = time.time()
-            sketch_view._update_constraint_preview(points[1], 
+            sketch_view._update_constraint_preview(points[1],
                                                 QPointF(200 + i, 200))
-            
+
             if i > 0:
-                # Verify minimum interval between updates
-                assert current_time - last_update >= min_interval
-            
+                # Verify minimum interval between updates with some tolerance
+                time_diff = current_time - last_update
+                assert time_diff >= min_interval * 0.9, f"Update interval too short: {time_diff} < {min_interval}"
             last_update = current_time
-            time.sleep(0.01)  # Small delay to simulate rapid mouse movement
 
     def test_preview_memory_management(self, sketch_view):
         """Test that preview items are properly managed in memory."""

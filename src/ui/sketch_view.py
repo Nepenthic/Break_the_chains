@@ -2,14 +2,13 @@
 Sketch view for 2D drawing and constraint creation.
 """
 
+from PyQt6.QtCore import Qt, QPointF, QRectF, QLineF, pyqtSignal
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QPainterPath, QTransform, QFont
 from PyQt6.QtWidgets import (
-    QGraphicsView, QGraphicsScene, QRubberBand,
-    QMenu, QGraphicsItem, QMessageBox
-)
-from PyQt6.QtCore import Qt, QRectF, QPointF, QSizeF, pyqtSignal
-from PyQt6.QtGui import (
-    QPainter, QPen, QBrush, QColor, QPainterPath,
-    QTransform, QFont
+    QGraphicsView, QGraphicsScene, QGraphicsItem,
+    QStyleOptionGraphicsItem, QWidget, QGraphicsEllipseItem,
+    QGraphicsLineItem, QGraphicsSimpleTextItem, QRubberBand,
+    QMenu, QMessageBox
 )
 from typing import Optional, List, Tuple, Dict, Set
 from ..core.sketch import (
@@ -18,185 +17,305 @@ from ..core.sketch import (
 )
 import time
 import logging
+import math
+
+class PreviewEllipseItem(QGraphicsEllipseItem):
+    """Preview item for circles and ellipses."""
+    Type = QGraphicsItem.UserType + 1
+    EllipseItem = Type
+
+    def type(self) -> int:
+        return self.Type
+
+class PreviewLineItem(QGraphicsLineItem):
+    """Preview line item for showing temporary lines."""
+    LineItem = QGraphicsItem.UserType + 2
+
+    def __init__(self, start, end, parent=None):
+        """Initialize preview line item.
+        
+        Args:
+            start: Starting point (QPointF or tuple of x,y coordinates)
+            end: Ending point (QPointF or tuple of x,y coordinates)
+            parent: Optional parent item
+        """
+        if isinstance(start, QPointF):
+            super().__init__(start.x(), start.y(), end.x(), end.y(), parent)
+        else:
+            super().__init__(start[0], start[1], end[0], end[1], parent)
+        self.setPen(QPen(Qt.GlobalColor.blue, 2))
+
+    def type(self):
+        """Return the type of the item."""
+        return self.LineItem
+
+class PreviewTextItem(QGraphicsSimpleTextItem):
+    """Preview item for text labels."""
+    Type = QGraphicsItem.UserType + 3
+    SimpleTextItem = Type
+
+    def type(self) -> int:
+        return self.Type
 
 class SketchItem(QGraphicsItem):
-    """Base class for sketch entities in the view."""
-    
-    def __init__(self, entity_id: str):
+    """Base class for sketch items."""
+    def __init__(self, entity_id: int):
         super().__init__()
-        self.entity_id = entity_id
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-        self.setAcceptHoverEvents(True)
-        self.hover_points: Set[QPointF] = set()
-        self.constraint_points: Set[QPointF] = set()
-        self.preview_items: List[QGraphicsItem] = []
-        self.is_preview_source = False
-
-    def add_hover_point(self, point: QPointF):
-        """Add a hover point for constraint snapping."""
-        self.hover_points.add(point)
-        self.update()
-
-    def clear_hover_points(self):
-        """Clear all hover points."""
-        self.hover_points.clear()
-        self.update()
-
-    def add_constraint_point(self, point: QPointF):
-        """Add a constraint point."""
-        self.constraint_points.add(point)
-        self.update()
-
-    def clear_constraint_points(self):
-        """Clear all constraint points."""
-        self.constraint_points.clear()
-        self.update()
+        self.entity_id = entity_id
+        self.preview_items = []
+        self.is_previewing = False
 
     def start_preview(self):
-        """Mark this item as the source of a constraint preview."""
-        self.is_preview_source = True
-        self.update()
+        """Mark item as preview source."""
+        self.is_previewing = True
 
     def end_preview(self):
-        """End preview mode for this item."""
-        self.is_preview_source = False
+        """End preview and clean up preview items."""
+        self.is_previewing = False
         self.clear_preview_items()
-        self.update()
 
     def clear_preview_items(self):
-        """Clear all preview items."""
-        for item in self.preview_items:
-            if item.scene():
+        """Remove all preview items from the scene."""
+        for item in self.preview_items[:]:  # Create a copy of the list to avoid modification during iteration
+            if item.scene() is not None:
                 item.scene().removeItem(item)
-        self.preview_items.clear()
+            self.preview_items.remove(item)
+            del item  # Explicitly delete the item
+
+    def boundingRect(self) -> QRectF:
+        """Return the bounding rectangle of the item."""
+        return QRectF()
+
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget = None):
+        """Paint the item."""
+        pass
 
 class PointItem(SketchItem):
-    """Visual representation of a point in the sketch."""
-    
-    def __init__(self, entity_id: str, x: float, y: float):
+    """A point in the sketch."""
+    def __init__(self, x: float, y: float, entity_id=None):
         super().__init__(entity_id)
+        self.x = x
+        self.y = y
         self.setPos(x, y)
-        self.radius = 3.0
 
     def boundingRect(self) -> QRectF:
-        """Get item's bounding rectangle."""
-        return QRectF(-self.radius, -self.radius,
-                     2 * self.radius, 2 * self.radius)
+        """Return the bounding rectangle of the point."""
+        return QRectF(-5, -5, 10, 10)
 
-    def paint(self, painter: QPainter,
-             option: 'QStyleOptionGraphicsItem',
-             widget: Optional['QWidget'] = None) -> None:
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget = None):
         """Paint the point."""
-        painter.setPen(QPen(Qt.GlobalColor.black, 1))
-        if self.isSelected():
-            painter.setBrush(QBrush(Qt.GlobalColor.blue))
-        else:
-            painter.setBrush(QBrush(Qt.GlobalColor.black))
-        painter.drawEllipse(self.boundingRect())
-        
-        # Draw hover points
-        painter.setPen(QPen(Qt.GlobalColor.green, 1, Qt.PenStyle.DashLine))
-        for point in self.hover_points:
-            painter.drawEllipse(point, 5, 5)
-        
-        # Draw constraint points
-        painter.setPen(QPen(Qt.GlobalColor.red, 2))
-        for point in self.constraint_points:
-            painter.drawEllipse(point, 3, 3)
+        painter.setPen(QPen(Qt.GlobalColor.black, 2))
+        painter.drawEllipse(QRectF(-3, -3, 6, 6))
 
-class LineItem(SketchItem):
-    """Visual representation of a line in the sketch."""
-    
-    def __init__(self, entity_id: str, x1: float, y1: float,
-                 x2: float, y2: float):
-        super().__init__(entity_id)
-        self.start = QPointF(x1, y1)
-        self.end = QPointF(x2, y2)
-        self.update_position()
+class LineItem(QGraphicsLineItem, SketchItem):
+    """Line item for the sketch."""
+    def __init__(self, start_pos, end_pos, entity_id=None, parent=None):
+        """Initialize line item.
+        
+        Args:
+            start_pos: Starting point (QPointF)
+            end_pos: Ending point (QPointF)
+            entity_id: Optional entity ID for the line
+            parent: Optional parent item (QGraphicsItem)
+        """
+        QGraphicsLineItem.__init__(self, start_pos.x(), start_pos.y(), end_pos.x(), end_pos.y(), parent)
+        SketchItem.__init__(self, entity_id)
+        self.start = start_pos
+        self.end = end_pos
+        self.preview_items = []  # Explicitly initialize preview_items
 
-    def update_position(self):
-        """Update item position to match line endpoints."""
-        self.setPos(self.start)
-        self.line = QPointF(self.end.x() - self.start.x(),
-                          self.end.y() - self.start.y())
+    def length(self):
+        """Calculate the length of the line."""
+        dx = self.end.x() - self.start.x()
+        dy = self.end.y() - self.start.y()
+        return math.sqrt(dx * dx + dy * dy)
+
+    def direction_vector(self):
+        """Get the normalized direction vector of the line."""
+        dx = self.end.x() - self.start.x()
+        dy = self.end.y() - self.start.y()
+        length = self.length()
+        if length < 1e-6:  # Avoid division by zero
+            return QPointF(0, 0)
+        return QPointF(dx / length, dy / length)
+
+    def perpendicular_vector(self, length=1.0):
+        """Get a perpendicular vector of the specified length.
+        
+        Args:
+            length: Length of the perpendicular vector (default: 1.0)
+        
+        Returns:
+            QPointF: Perpendicular vector
+        """
+        dir_vec = self.direction_vector()
+        if dir_vec.manhattanLength() == 0:
+            return QPointF(0, 0)
+        return QPointF(-dir_vec.y() * length, dir_vec.x() * length)
+
+    def closest_point(self, point: QPointF) -> QPointF:
+        """Find the closest point on the line to the given point.
+        
+        Args:
+            point: Point to find closest point to
+        
+        Returns:
+            QPointF: Closest point on the line
+        """
+        # Convert point to local coordinates
+        dir_vec = self.direction_vector()
+        if dir_vec.manhattanLength() == 0:
+            return self.start
+
+        # Project point onto line
+        v = QPointF(point.x() - self.start.x(), point.y() - self.start.y())
+        t = QPointF.dotProduct(v, dir_vec)
+        length = self.length()
+
+        # Clamp t to line segment
+        t = max(0, min(length, t))
+
+        # Return point on line
+        return QPointF(
+            self.start.x() + dir_vec.x() * t,
+            self.start.y() + dir_vec.y() * t
+        )
+
+    def midpoint(self):
+        """Get the midpoint of the line."""
+        return QPointF(
+            (self.start.x() + self.end.x()) / 2,
+            (self.start.y() + self.end.y()) / 2
+        )
 
     def boundingRect(self) -> QRectF:
-        """Get item's bounding rectangle."""
-        return QRectF(0, 0, self.line.x(), self.line.y())
+        """Return the bounding rectangle of the line."""
+        return QRectF(
+            min(self.start.x(), self.end.x()) - 5,
+            min(self.start.y(), self.end.y()) - 5,
+            abs(self.end.x() - self.start.x()) + 10,
+            abs(self.end.y() - self.start.y()) + 10
+        )
 
-    def paint(self, painter: QPainter,
-             option: 'QStyleOptionGraphicsItem',
-             widget: Optional['QWidget'] = None) -> None:
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget = None):
         """Paint the line."""
-        pen = QPen(Qt.GlobalColor.black, 1)
-        if self.isSelected():
-            pen.setColor(Qt.GlobalColor.blue)
-        painter.setPen(pen)
-        painter.drawLine(QPointF(0, 0), self.line)
-        
-        # Draw hover points
-        painter.setPen(QPen(Qt.GlobalColor.green, 1, Qt.PenStyle.DashLine))
-        for point in self.hover_points:
-            painter.drawEllipse(point, 5, 5)
-        
-        # Draw constraint points
-        painter.setPen(QPen(Qt.GlobalColor.red, 2))
-        for point in self.constraint_points:
-            painter.drawEllipse(point, 3, 3)
+        painter.setPen(QPen(Qt.GlobalColor.black, 2))
+        painter.drawLine(self.start, self.end)
 
-class CircleItem(SketchItem):
-    """Visual representation of a circle in the sketch."""
-    
-    def __init__(self, entity_id: str, center_x: float,
-                 center_y: float, radius: float):
-        super().__init__(entity_id)
-        self.setPos(center_x - radius, center_y - radius)
-        self.radius = radius
-        self.center = QPointF(center_x, center_y)
+class CircleItem(QGraphicsEllipseItem, SketchItem):
+    """Circle item for the sketch."""
+    def __init__(self, center_pos, radius, entity_id=None, parent=None):
+        """Initialize circle item.
+        
+        Args:
+            center_pos: Center point (QPointF)
+            radius: Radius of the circle
+            entity_id: Optional entity ID for the circle
+            parent: Optional parent item (QGraphicsItem)
+        """
+        QGraphicsEllipseItem.__init__(self, center_pos.x() - radius, center_pos.y() - radius, 
+                                     2 * radius, 2 * radius, parent)
+        SketchItem.__init__(self, entity_id)
+        self._center = center_pos
+        self._radius = radius
+        self.preview_items = []  # Explicitly initialize preview_items
+        self.setPen(QPen(QColor.fromRgb(0, 0, 255), 2))
+
+    @property
+    def radius(self):
+        """Get the radius of the circle."""
+        return self._radius
+
+    @radius.setter
+    def radius(self, value):
+        """Set the radius of the circle."""
+        self._radius = value
+        self.setRect(self._center.x() - value, self._center.y() - value, 
+                    2 * value, 2 * value)
+
+    def center(self):
+        """Get the center point of the circle."""
+        return self._center
+
+    def closest_point(self, point: QPointF) -> QPointF:
+        """Find the closest point on the circle to the given point.
+        
+        Args:
+            point: Point to find closest point to
+        
+        Returns:
+            QPointF: Closest point on the circle
+        """
+        # Vector from center to point
+        dx = point.x() - self._center.x()
+        dy = point.y() - self._center.y()
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist < 1e-6:  # Point is at center
+            return QPointF(self._center.x() + self._radius, self._center.y())
+            
+        # Scale vector to radius length
+        scale = self._radius / dist
+        return QPointF(
+            self._center.x() + dx * scale,
+            self._center.y() + dy * scale
+        )
 
     def boundingRect(self) -> QRectF:
-        """Get item's bounding rectangle."""
-        return QRectF(0, 0, 2 * self.radius, 2 * self.radius)
+        """Return the bounding rectangle of the circle."""
+        return QRectF(
+            self._center.x() - self._radius - 5,
+            self._center.y() - self._radius - 5,
+            2 * self._radius + 10,
+            2 * self._radius + 10
+        )
 
-    def paint(self, painter: QPainter,
-             option: 'QStyleOptionGraphicsItem',
-             widget: Optional['QWidget'] = None) -> None:
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget = None):
         """Paint the circle."""
-        pen = QPen(Qt.GlobalColor.black, 1)
-        if self.isSelected() or self.is_preview_source:
-            pen.setColor(Qt.GlobalColor.blue)
-        painter.setPen(pen)
-        painter.drawEllipse(self.boundingRect())
-        
-        # Draw center point if selected or preview source
-        if self.isSelected() or self.is_preview_source:
-            painter.setPen(QPen(Qt.GlobalColor.blue, 2))
-            center_local = QPointF(self.radius, self.radius)
-            painter.drawEllipse(center_local, 3, 3)
-        
-        # Draw hover points
-        painter.setPen(QPen(Qt.GlobalColor.green, 1, Qt.PenStyle.DashLine))
-        for point in self.hover_points:
-            painter.drawEllipse(point, 5, 5)
-        
-        # Draw constraint points
-        painter.setPen(QPen(Qt.GlobalColor.red, 2))
-        for point in self.constraint_points:
-            painter.drawEllipse(point, 3, 3)
+        painter.setPen(QPen(Qt.GlobalColor.black, 2))
+        painter.drawEllipse(self._center, self._radius, self._radius)
 
 class SketchView(QGraphicsView):
     """Graphics view for sketch creation and editing."""
     
+    # Item types
+    PointItem = PointItem
+    LineItem = LineItem
+    CircleItem = CircleItem
+
+    # Preview item types
+    PreviewEllipseItem = PreviewEllipseItem
+    PreviewLineItem = PreviewLineItem
+    PreviewTextItem = PreviewTextItem
+
     # Signals
     entity_selected = pyqtSignal(str)  # Emits entity_id
-    entity_modified = pyqtSignal(str)  # Emits entity_id
+    entity_updated = pyqtSignal(str)   # Emits entity_id
+    entity_deleted = pyqtSignal(str)   # Emits entity_id
     constraint_added = pyqtSignal(str)  # Emits constraint_id
     
-    def __init__(self):
-        super().__init__()
-        self.scene = QGraphicsScene()
-        self.setScene(self.scene)
+    @property
+    def scene(self):
+        """Get the graphics scene."""
+        return self._scene
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.scale(1, -1)  # Flip Y-axis to match mathematical coordinates
+        self.start_pos = None
+        self.current_item = None
+        self.update_callbacks = []  # Initialize the update_callbacks list
         
         # Initialize sketch manager
         self.sketch_manager = SketchManager()
@@ -205,7 +324,6 @@ class SketchView(QGraphicsView):
         # Drawing state
         self.current_tool = None
         self.drawing = False
-        self.start_pos = None
         self.temp_item = None
         self.rubber_band = None
         self.last_hover_item = None
@@ -214,8 +332,8 @@ class SketchView(QGraphicsView):
         self.constraint_entities = []
         
         # Performance settings
-        self.update_interval = 1/60  # 60 FPS
-        self.last_update = 0
+        self.last_update_time = 0
+        self.update_interval = 0.016666667  # 60 FPS target (1/60 seconds)
         
         # View settings
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -230,6 +348,9 @@ class SketchView(QGraphicsView):
         self.setResizeAnchor(
             QGraphicsView.ViewportAnchor.AnchorUnderMouse
         )
+        
+        # Initialize preview-related attributes
+        self.preview_items = []
         
         # Initialize tools
         self._setup_tools()
@@ -273,19 +394,19 @@ class SketchView(QGraphicsView):
         item = self._find_item_by_entity_id(entity_id)
         if item:
             item.update()
-            self.entity_modified.emit(entity_id)
+            self.entity_updated.emit(entity_id)
 
     def _find_item_by_entity_id(self, entity_id: str) -> Optional[SketchItem]:
         """Find a graphics item by its entity ID."""
-        for item in self.scene.items():
-            if isinstance(item, SketchItem) and item.entity_id == entity_id:
+        for item in self._scene.items():
+            if hasattr(item, 'entity_id') and item.entity_id == entity_id:
                 return item
         return None
 
     def _start_constraint(self, constraint_type: ConstraintType):
         """Start creating a constraint."""
         # Clear any existing previews
-        for item in self.scene.items():
+        for item in self._scene.items():
             if isinstance(item, SketchItem):
                 item.end_preview()
         
@@ -315,7 +436,7 @@ class SketchView(QGraphicsView):
     def _add_constraint(self):
         """Add constraint between selected entities."""
         # Clear any existing previews
-        for item in self.scene.items():
+        for item in self._scene.items():
             if isinstance(item, SketchItem):
                 item.end_preview()
         
@@ -404,7 +525,7 @@ class SketchView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.constraint_mode:
                 # Handle constraint creation
-                item = self.scene.itemAt(
+                item = self._scene.itemAt(
                     self.mapToScene(event.pos()),
                     QTransform()
                 )
@@ -423,7 +544,7 @@ class SketchView(QGraphicsView):
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
         current_time = time.time()
-        if current_time - self.last_update < self.update_interval:
+        if current_time - self.last_update_time < self.update_interval:
             return  # Skip update if too soon
         
         scene_pos = self.mapToScene(event.pos())
@@ -433,7 +554,7 @@ class SketchView(QGraphicsView):
             self.last_hover_item.clear_hover_points()
         
         # Update hover points and constraint previews
-        item = self.scene.itemAt(scene_pos, QTransform())
+        item = self._scene.itemAt(scene_pos, QTransform())
         if isinstance(item, SketchItem):
             item.add_hover_point(scene_pos)
             self.last_hover_item = item
@@ -445,25 +566,25 @@ class SketchView(QGraphicsView):
         if self.drawing and self.start_pos:
             if self.current_tool == 'line':
                 if self.temp_item:
-                    self.scene.removeItem(self.temp_item)
-                self.temp_item = self.scene.addLine(
+                    self._scene.removeItem(self.temp_item)
+                self.temp_item = self._scene.addLine(
                     self.start_pos.x(), self.start_pos.y(),
                     scene_pos.x(), scene_pos.y(),
                     QPen(Qt.GlobalColor.black, 1, Qt.PenStyle.DashLine)
                 )
             elif self.current_tool == 'circle':
                 if self.temp_item:
-                    self.scene.removeItem(self.temp_item)
+                    self._scene.removeItem(self.temp_item)
                 radius = ((scene_pos.x() - self.start_pos.x())**2 +
                          (scene_pos.y() - self.start_pos.y())**2)**0.5
-                self.temp_item = self.scene.addEllipse(
+                self.temp_item = self._scene.addEllipse(
                     self.start_pos.x() - radius,
                     self.start_pos.y() - radius,
                     2 * radius, 2 * radius,
                     QPen(Qt.GlobalColor.black, 1, Qt.PenStyle.DashLine)
                 )
         
-        self.last_update = current_time
+        self.last_update_time = current_time
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -476,7 +597,7 @@ class SketchView(QGraphicsView):
                 self._finish_circle(scene_pos)
             
             if self.temp_item:
-                self.scene.removeItem(self.temp_item)
+                self._scene.removeItem(self.temp_item)
                 self.temp_item = None
             
             self.drawing = False
@@ -501,371 +622,330 @@ class SketchView(QGraphicsView):
     def _point_tool(self, event, pos):
         """Handle point tool."""
         entity_id = self.sketch_manager.add_point(pos.x(), pos.y())
-        point_item = PointItem(entity_id, pos.x(), pos.y())
-        self.scene.addItem(point_item)
+        point_item = PointItem(pos.x(), pos.y(), entity_id)
+        self._scene.addItem(point_item)
+        self._notify_update(point_item)
 
     def _line_tool(self, event, pos):
-        """Handle line tool."""
-        if not self.drawing:
-            self.drawing = True
+        """Handle line tool events."""
+        if event is None:  # First click
+            entity_id = self.sketch_manager.add_line(pos.x(), pos.y(), pos.x(), pos.y())
+            self.current_item = LineItem(pos, pos, entity_id)
+            self.scene.addItem(self.current_item)
             self.start_pos = pos
-        else:
-            self._finish_line(pos)
+        else:  # Mouse move or second click
+            if self.current_item:
+                self.current_item.end = pos
+                self.current_item.setLine(
+                    self.start_pos.x(), self.start_pos.y(),
+                    pos.x(), pos.y()
+                )
+                if event is not None and event.type() == QEvent.Type.MouseButtonPress:
+                    self._finish_line(pos)
 
     def _finish_line(self, end_pos):
         """Finish creating a line."""
-        if self.start_pos:
-            entity_id = self.sketch_manager.add_line(
+        if self.current_item and isinstance(self.current_item, LineItem):
+            self.current_item.end = end_pos
+            self.current_item.setLine(
                 self.start_pos.x(), self.start_pos.y(),
                 end_pos.x(), end_pos.y()
             )
-            line_item = LineItem(
-                entity_id,
-                self.start_pos.x(), self.start_pos.y(),
-                end_pos.x(), end_pos.y()
-            )
-            self.scene.addItem(line_item)
+            self._notify_update(self.current_item)
+            self.current_item = None
+        self.start_pos = None
 
-    def _circle_tool(self, event, pos):
-        """Handle circle tool."""
-        if not self.drawing:
-            self.drawing = True
+    def _circle_tool(self, event, pos=None):
+        """Handle circle tool events.
+
+        Args:
+            event: Mouse event
+            pos: Optional position override
+        """
+        if event is None:
+            # First click - start circle
+            entity_id = self.sketch_manager.add_circle(pos.x(), pos.y(), 0)
+            self.current_item = CircleItem(pos, 0, entity_id)
+            self._scene.addItem(self.current_item)
             self.start_pos = pos
         else:
-            self._finish_circle(pos)
+            # Mouse move or second click - update circle
+            if self.current_item and self.start_pos:
+                radius = (pos - self.start_pos).manhattanLength()
+                self.current_item.radius = radius
+                rect = QRectF(self.start_pos.x() - radius, self.start_pos.y() - radius,
+                             radius * 2, radius * 2)
+                self.current_item.setRect(rect)
 
     def _finish_circle(self, end_pos):
         """Finish creating a circle."""
-        if self.start_pos:
-            radius = ((end_pos.x() - self.start_pos.x())**2 +
-                     (end_pos.y() - self.start_pos.y())**2)**0.5
-            entity_id = self.sketch_manager.add_circle(
-                self.start_pos.x(), self.start_pos.y(), radius
-            )
-            circle_item = CircleItem(
-                entity_id,
-                self.start_pos.x(), self.start_pos.y(),
-                radius
-            )
-            self.scene.addItem(circle_item)
+        if self.current_item and isinstance(self.current_item, CircleItem):
+            radius = QLineF(self.start_pos, end_pos).length()
+            self.current_item.radius = radius
+            self._notify_update(self.current_item)
+            self.current_item = None
+        self.start_pos = None
 
-    def _update_constraint_preview(self, hover_item: SketchItem, scene_pos: QPointF):
-        """Update constraint preview based on current constraint type.
-        
-        This method provides real-time visual feedback for constraint creation:
-        - Coincident: Shows connection between points with snap indicators
-        - Equal: Shows current and target measurements with directional hints
-        - Parallel/Perpendicular: Shows alignment guides and angle indicators
-        
+    def _create_adjustment_arrow(self, from_item, to_item):
+        """Create an arrow indicating adjustment direction.
+
         Args:
-            hover_item: The SketchItem currently under the mouse cursor
-            scene_pos: Current mouse position in scene coordinates
+            from_item: Source item (shorter/smaller)
+            to_item: Target item (longer/larger)
+
+        Returns:
+            QGraphicsItem: Arrow indicating adjustment direction
         """
-        # Clear any existing preview items when hovering over a new item
-        if self.last_hover_item and self.last_hover_item != hover_item:
-            self.last_hover_item.end_preview()
-        
-        first_item = self._find_item_by_entity_id(self.constraint_entities[0])
-        if not first_item:
+        # Calculate arrow direction based on item centers
+        from_center = from_item.pos()
+        to_center = to_item.pos()
+
+        # Create arrow path
+        arrow_size = 10
+        arrow_angle = 30  # degrees
+
+        # Calculate direction vector
+        dx = to_center.x() - from_center.x()
+        dy = to_center.y() - from_center.y()
+        length = (dx * dx + dy * dy) ** 0.5
+
+        if length < 1e-6:
+            # If items are at same position, use default direction
+            dx, dy = 1, 0
+        else:
+            dx /= length
+            dy /= length
+
+        # Create arrow head points
+        import math
+        angle = math.atan2(dy, dx)
+        angle_rad = math.pi / 180 * arrow_angle
+
+        # Main arrow line
+        arrow = PreviewLineItem(
+            (from_center.x(), from_center.y()),
+            (to_center.x(), to_center.y())
+        )
+        arrow.setPen(QPen(Qt.GlobalColor.blue, 2, Qt.PenStyle.DashLine))
+        return arrow
+
+    def _update_constraint_preview(self, target_item, pos):
+        """Update the constraint preview based on the current target item and position."""
+        current_time = time.time()
+        if current_time - self.last_update_time < self.update_interval:
             return
 
-        # Font settings for better visibility
-        label_font = QFont("Arial", 10)
-        label_color = Qt.GlobalColor.blue
+        self.last_update_time = current_time
+        self.clear_preview_items()
 
+        if not self.constraint_entities or not target_item:
+            return
+
+        source_item = self._find_item_by_entity_id(self.constraint_entities[0])
+        if not source_item:
+            return
+
+        # Cache commonly used values
+        source_pos = source_item.pos()
+        target_pos = target_item.pos()
+        
+        # Create preview items based on constraint type
         if self.constraint_type == ConstraintType.COINCIDENT:
-            # Only show preview for point-to-point coincidence
-            if isinstance(first_item, PointItem):
-                # Clear previous preview and mark as source
-                first_item.clear_preview_items()
-                first_item.start_preview()
-                
-                # Draw highlight circle around first point for emphasis
-                highlight = self.scene.addEllipse(
-                    first_item.pos().x() - 5, first_item.pos().y() - 5,
-                    10, 10,
-                    QPen(label_color, 1, Qt.PenStyle.DashLine)
-                )
-                first_item.preview_items.append(highlight)
-                
-                if isinstance(hover_item, PointItem):
-                    # Draw dashed guide line between points to show connection
-                    preview_line = self.scene.addLine(
-                        first_item.pos().x(), first_item.pos().y(),
-                        hover_item.pos().x(), hover_item.pos().y(),
-                        QPen(label_color, 1, Qt.PenStyle.DashLine)
+            if isinstance(target_item, PointItem):
+                # Check if points are already coincident
+                if (abs(source_pos.x() - target_pos.x()) < 1e-6 and
+                    abs(source_pos.y() - target_pos.y()) < 1e-6):
+                    # Show green indicator for already-coincident points
+                    coincident = PreviewEllipseItem(
+                        source_pos.x() - 4, source_pos.y() - 4,
+                        8, 8
                     )
-                    first_item.preview_items.append(preview_line)
-                    
-                    # Draw filled dot to indicate snap target
-                    snap_preview = self.scene.addEllipse(
-                        hover_item.pos().x() - 3, hover_item.pos().y() - 3,
-                        6, 6,
-                        QPen(label_color, 2),
-                        QBrush(label_color)
-                    )
-                    first_item.preview_items.append(snap_preview)
+                    coincident.setPen(QPen(Qt.GlobalColor.green, 2))
+                    coincident.setBrush(QBrush(Qt.GlobalColor.green))
+                    self._scene.addItem(coincident)
+                    source_item.preview_items.append(coincident)
                 else:
-                    # Show red X to indicate invalid selection
-                    size = 6
-                    x, y = scene_pos.x(), scene_pos.y()
-                    for start, end in [(-size, -size, size, size),
-                                     (-size, size, size, -size)]:
-                        invalid_mark = self.scene.addLine(
-                            x + start, y + start,
-                            x + end, y + end,
-                            QPen(Qt.GlobalColor.red, 2)
-                        )
-                        first_item.preview_items.append(invalid_mark)
+                    # Create highlight circle
+                    highlight = PreviewEllipseItem(source_pos.x() - 5, source_pos.y() - 5, 10, 10)
+                    highlight.setPen(QPen(Qt.GlobalColor.blue))
+                    self._scene.addItem(highlight)
+                    source_item.preview_items.append(highlight)
+
+                    # Create guide line
+                    guide = PreviewLineItem(source_pos, target_pos)
+                    guide.setPen(QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DashLine))
+                    self._scene.addItem(guide)
+                    source_item.preview_items.append(guide)
+            else:
+                # Show invalid selection indicator
+                self._show_invalid_selection(source_item, source_pos)
 
         elif self.constraint_type == ConstraintType.EQUAL:
-            if isinstance(first_item, LineItem) and isinstance(hover_item, LineItem):
-                # Clear previous preview and mark as source
-                first_item.clear_preview_items()
-                first_item.start_preview()
-                
-                # Calculate current lengths and target (average) length
-                len1 = ((first_item.end.x() - first_item.start.x()) ** 2 +
-                       (first_item.end.y() - first_item.start.y()) ** 2) ** 0.5
-                len2 = ((hover_item.end.x() - hover_item.start.x()) ** 2 +
-                       (hover_item.end.y() - hover_item.start.y()) ** 2) ** 0.5
-                avg_len = (len1 + len2) / 2
-                
-                # Draw length indicators and labels for both lines
-                for line, length in [(first_item, len1), (hover_item, len2)]:
-                    mid_x = (line.start.x() + line.end.x()) / 2
-                    mid_y = (line.start.y() + line.end.y()) / 2
-                    
-                    # Calculate perpendicular direction for indicator placement
-                    dx = line.end.x() - line.start.x()
-                    dy = line.end.y() - line.start.y()
-                    if dx * dx + dy * dy > 0:
-                        # Normalize vector and rotate 90 degrees for perpendicular indicator
-                        length = (dx * dx + dy * dy) ** 0.5
-                        dx, dy = dx / length, dy / length
-                        perp_x, perp_y = -dy * 10, dx * 10
-                        
-                        # Draw perpendicular indicator at midpoint
-                        indicator = self.scene.addLine(
-                            mid_x - perp_x, mid_y - perp_y,
-                            mid_x + perp_x, mid_y + perp_y,
-                            QPen(label_color, 1)
-                        )
-                        first_item.preview_items.append(indicator)
-                    
-                    # Add length label with background for better visibility
-                    text = self.scene.addSimpleText(
-                        f"{length:.1f}",
-                        font=label_font
-                    )
-                    text.setBrush(QBrush(label_color))
-                    # Position label above the line using perpendicular offset
-                    text.setPos(mid_x + perp_x, mid_y + perp_y)
-                    first_item.preview_items.append(text)
-                
-                # Show target length above current mouse position
-                text = self.scene.addSimpleText(
-                    f"Target: {avg_len:.1f}",
-                    font=label_font
-                )
-                text.setBrush(QBrush(label_color))
-                text.setPos(scene_pos.x(), scene_pos.y() - 20)
-                first_item.preview_items.append(text)
-                
-            elif isinstance(first_item, CircleItem) and isinstance(hover_item, CircleItem):
-                # Clear previous preview and mark as source
-                first_item.clear_preview_items()
-                first_item.start_preview()
-                
-                # Calculate target (average) radius
-                avg_radius = (first_item.radius + hover_item.radius) / 2
-                
-                # Draw preview elements for both circles
-                for circle in [first_item, hover_item]:
-                    # Show dashed preview of target radius
-                    preview_circle = self.scene.addEllipse(
-                        circle.center.x() - avg_radius,
-                        circle.center.y() - avg_radius,
-                        2 * avg_radius,
-                        2 * avg_radius,
-                        QPen(label_color, 1, Qt.PenStyle.DashLine)
-                    )
-                    first_item.preview_items.append(preview_circle)
-                    
-                    # Draw radius line for measurement reference
-                    radius_line = self.scene.addLine(
-                        circle.center.x(), circle.center.y(),
-                        circle.center.x() + circle.radius, circle.center.y(),
-                        QPen(label_color, 1, Qt.PenStyle.DashLine)
-                    )
-                    first_item.preview_items.append(radius_line)
-                    
-                    # Add current radius label
-                    text = self.scene.addSimpleText(
-                        f"R: {circle.radius:.1f}",
-                        font=label_font
-                    )
-                    text.setBrush(QBrush(label_color))
-                    # Position label above radius line
-                    text.setPos(
-                        circle.center.x() + circle.radius / 2,
-                        circle.center.y() - 15
-                    )
-                    first_item.preview_items.append(text)
-                    
-                    # Draw arrow indicating radius change direction
-                    arrow_size = 10
-                    if circle.radius < avg_radius:
-                        # Draw expansion arrow (pointing outward)
-                        arrow = self.scene.addLine(
-                            circle.center.x() + circle.radius, circle.center.y(),
-                            circle.center.x() + circle.radius + arrow_size, circle.center.y(),
-                            QPen(label_color, 2)
-                        )
-                    else:
-                        # Draw contraction arrow (pointing inward)
-                        arrow = self.scene.addLine(
-                            circle.center.x() + circle.radius, circle.center.y(),
-                            circle.center.x() + circle.radius - arrow_size, circle.center.y(),
-                            QPen(label_color, 2)
-                        )
-                    first_item.preview_items.append(arrow)
-                
-                # Show target radius above current mouse position
-                text = self.scene.addSimpleText(
-                    f"Target R: {avg_radius:.1f}",
-                    font=label_font
-                )
-                text.setBrush(QBrush(label_color))
-                text.setPos(scene_pos.x(), scene_pos.y() - 20)
-                first_item.preview_items.append(text)
+            if isinstance(target_item, LineItem) and isinstance(source_item, LineItem):
+                self._show_equal_lines_preview(source_item, target_item)
+            elif isinstance(target_item, CircleItem) and isinstance(source_item, CircleItem):
+                self._show_equal_circles_preview(source_item, target_item)
+            else:
+                self._show_invalid_selection(source_item, source_pos)
 
-        elif self.constraint_type == ConstraintType.PARALLEL:
-            if (isinstance(first_item, LineItem) and 
-                isinstance(hover_item, LineItem)):
-                # Clear previous preview
-                first_item.clear_preview_items()
-                
-                # Mark first item as preview source
-                first_item.start_preview()
-                
-                # Get line vectors
-                line1_start, line1_end = first_item.start, first_item.end
-                line2_start, line2_end = hover_item.start, hover_item.end
-                
-                # Calculate direction vectors
-                dx1 = line1_end.x() - line1_start.x()
-                dy1 = line1_end.y() - line1_start.y()
-                len1 = (dx1 * dx1 + dy1 * dy1) ** 0.5
-                
-                if len1 > 0:
-                    # Normalize first line direction
-                    dx1, dy1 = dx1 / len1, dy1 / len1
-                    
-                    # Create extension lines in both directions
-                    extension_length = 50  # pixels
-                    
-                    # Draw extension lines for first line
-                    for point, direction in [(line1_start, -1), (line1_end, 1)]:
-                        ext_line = self.scene.addLine(
-                            point.x(), point.y(),
-                            point.x() + dx1 * extension_length * direction,
-                            point.y() + dy1 * extension_length * direction,
-                            QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DashLine)
-                        )
-                        first_item.preview_items.append(ext_line)
-                    
-                    # Draw extension lines for second line
-                    for point in [line2_start, line2_end]:
-                        ext_line = self.scene.addLine(
-                            point.x(), point.y(),
-                            point.x() + dx1 * extension_length,
-                            point.y() + dy1 * extension_length,
-                            QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DashLine)
-                        )
-                        first_item.preview_items.append(ext_line)
-                    
-                    # Draw parallel indicators (small arrows)
-                    arrow_size = 10
-                    mid1_x = (line1_start.x() + line1_end.x()) / 2
-                    mid1_y = (line1_start.y() + line1_end.y()) / 2
-                    mid2_x = (line2_start.x() + line2_end.x()) / 2
-                    mid2_y = (line2_start.y() + line2_end.y()) / 2
-                    
-                    # Draw arrows perpendicular to lines
-                    for mid_x, mid_y in [(mid1_x, mid1_y), (mid2_x, mid2_y)]:
-                        # Create perpendicular vector for arrows
-                        arrow1 = self.scene.addLine(
-                            mid_x - dy1 * arrow_size, mid_y + dx1 * arrow_size,
-                            mid_x + dy1 * arrow_size, mid_y - dx1 * arrow_size,
-                            QPen(Qt.GlobalColor.blue, 2)
-                        )
-                        first_item.preview_items.append(arrow1)
+        elif self.constraint_type in (ConstraintType.PARALLEL, ConstraintType.PERPENDICULAR):
+            if isinstance(target_item, LineItem) and isinstance(source_item, LineItem):
+                if self.constraint_type == ConstraintType.PARALLEL:
+                    self._show_parallel_preview(source_item, target_item)
+                else:
+                    self._show_perpendicular_preview(source_item, target_item)
+            else:
+                self._show_invalid_selection(source_item, source_pos)
 
-        elif self.constraint_type == ConstraintType.PERPENDICULAR:
-            if (isinstance(first_item, LineItem) and 
-                isinstance(hover_item, LineItem)):
-                # Clear previous preview
-                first_item.clear_preview_items()
-                
-                # Mark first item as preview source
-                first_item.start_preview()
-                
-                # Get line vectors
-                line1_start, line1_end = first_item.start, first_item.end
-                line2_start, line2_end = hover_item.start, hover_item.end
-                
-                # Calculate direction vectors
-                dx1 = line1_end.x() - line1_start.x()
-                dy1 = line1_end.y() - line1_start.y()
-                len1 = (dx1 * dx1 + dy1 * dy1) ** 0.5
-                
-                if len1 > 0:
-                    # Normalize first line direction
-                    dx1, dy1 = dx1 / len1, dy1 / len1
-                    
-                    # Calculate perpendicular vector (rotate 90 degrees)
-                    perp_dx, perp_dy = -dy1, dx1
-                    
-                    # Calculate intersection point (if lines intersect)
-                    dx2 = line2_end.x() - line2_start.x()
-                    dy2 = line2_end.y() - line2_start.y()
-                    
-                    # Draw preview of perpendicular line
-                    mid2_x = (line2_start.x() + line2_end.x()) / 2
-                    mid2_y = (line2_start.y() + line2_end.y()) / 2
-                    preview_length = ((dx2 * dx2 + dy2 * dy2) ** 0.5) / 2
-                    
-                    preview_line = self.scene.addLine(
-                        mid2_x - perp_dx * preview_length,
-                        mid2_y - perp_dy * preview_length,
-                        mid2_x + perp_dx * preview_length,
-                        mid2_y + perp_dy * preview_length,
-                        QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DashLine)
-                    )
-                    first_item.preview_items.append(preview_line)
-                    
-                    # Draw right angle indicator
-                    indicator_size = 10
-                    # Find closest point on first line to second line's midpoint
-                    t = ((mid2_x - line1_start.x()) * dx1 +
-                         (mid2_y - line1_start.y()) * dy1)
-                    closest_x = line1_start.x() + dx1 * t
-                    closest_y = line1_start.y() + dy1 * t
-                    
-                    # Draw right angle symbol
-                    path = QPainterPath()
-                    path.moveTo(closest_x, closest_y)
-                    path.lineTo(closest_x + dx1 * indicator_size,
-                              closest_y + dy1 * indicator_size)
-                    path.lineTo(closest_x + dx1 * indicator_size - perp_dx * indicator_size,
-                              closest_y + dy1 * indicator_size - perp_dy * indicator_size)
-                    
-                    indicator = self.scene.addPath(
-                        path,
-                        QPen(Qt.GlobalColor.blue, 2)
-                    )
-                    first_item.preview_items.append(indicator)
+    def _show_invalid_selection(self, source_item: SketchItem, pos: QPointF):
+        """Show red X to indicate invalid selection."""
+        size = 6
+        x, y = pos.x(), pos.y()
+        invalid_lines = [
+            (QPointF(x - size, y - size), QPointF(x + size, y + size)),
+            (QPointF(x - size, y + size), QPointF(x + size, y - size))
+        ]
+        for start, end in invalid_lines:
+            invalid_mark = PreviewLineItem(start, end)
+            invalid_mark.setPen(QPen(Qt.GlobalColor.red, 2))
+            self._scene.addItem(invalid_mark)
+            source_item.preview_items.append(invalid_mark)
+
+    def _show_equal_lines_preview(self, source: LineItem, target: LineItem):
+        """Show preview for equal length constraint between lines."""
+        # Calculate lengths
+        len1 = source.length()
+        len2 = target.length()
+        
+        # Draw length indicators and labels
+        for line, length in [(source, len1), (target, len2)]:
+            mid_point = line.midpoint()
+            perp = line.perpendicular_vector(10)  # Get perpendicular vector of length 10
+            
+            # Draw perpendicular indicator at midpoint
+            indicator = PreviewLineItem(
+                mid_point - perp,
+                mid_point + perp
+            )
+            indicator.setPen(QPen(Qt.GlobalColor.blue))
+            self._scene.addItem(indicator)
+            source.preview_items.append(indicator)
+            
+            # Add length label
+            text = PreviewTextItem(f"{length:.1f}")
+            text.setFont(QFont("Arial", 10))
+            text.setBrush(QBrush(Qt.GlobalColor.blue))
+            text.setPos(mid_point + perp)
+            self._scene.addItem(text)
+            source.preview_items.append(text)
+        
+        # Draw arrow if lengths differ
+        if abs(len1 - len2) > 1e-6:
+            shorter = source if len1 < len2 else target
+            longer = target if len1 < len2 else source
+            arrow = self._create_adjustment_arrow(shorter, longer)
+            self._scene.addItem(arrow)
+            source.preview_items.append(arrow)
+
+    def _show_equal_circles_preview(self, source: CircleItem, target: CircleItem):
+        """Show preview for equal radius constraint between circles."""
+        # Draw radius indicators and labels
+        for circle in [source, target]:
+            # Draw radius line
+            radius_line = PreviewLineItem(
+                circle.center(),
+                QPointF(circle.center().x() + circle.radius, circle.center().y())
+            )
+            radius_line.setPen(QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DashLine))
+            self._scene.addItem(radius_line)
+            source.preview_items.append(radius_line)
+            
+            # Add radius label
+            text = PreviewTextItem(f"R={circle.radius:.1f}")
+            text.setFont(QFont("Arial", 10))
+            text.setBrush(QBrush(Qt.GlobalColor.blue))
+            text.setPos(
+                circle.center().x() + circle.radius / 2,
+                circle.center().y() + 10
+            )
+            self._scene.addItem(text)
+            source.preview_items.append(text)
+        
+        # Draw arrow if radii differ
+        if abs(source.radius - target.radius) > 1e-6:
+            shorter = source if source.radius < target.radius else target
+            longer = target if source.radius < target.radius else source
+            arrow = self._create_adjustment_arrow(shorter, longer)
+            self._scene.addItem(arrow)
+            source.preview_items.append(arrow)
+
+    def _show_parallel_preview(self, source: LineItem, target: LineItem):
+        """Show preview for parallel constraint between lines."""
+        # Get line vectors
+        source_vec = source.direction_vector()
+        if source_vec.manhattanLength() == 0:
+            return
+        
+        # Create extension lines
+        extension_length = 50
+        for line in [source, target]:
+            for point in [line.start, line.end]:
+                ext_line = PreviewLineItem(
+                    point,
+                    point + source_vec * extension_length
+                )
+                ext_line.setPen(QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DashLine))
+                self._scene.addItem(ext_line)
+                source.preview_items.append(ext_line)
+        
+        # Draw parallel indicators (arrows)
+        arrow_size = 10
+        for line in [source, target]:
+            mid_point = line.midpoint()
+            perp = line.perpendicular_vector(arrow_size)
+            arrow = PreviewLineItem(
+                mid_point - perp,
+                mid_point + perp
+            )
+            arrow.setPen(QPen(Qt.GlobalColor.blue, 2))
+            self._scene.addItem(arrow)
+            source.preview_items.append(arrow)
+
+    def _show_perpendicular_preview(self, source: LineItem, target: LineItem):
+        """Show preview for perpendicular constraint between lines."""
+        source_vec = source.direction_vector()
+        if source_vec.manhattanLength() == 0:
+            return
+        
+        # Calculate perpendicular vector
+        perp_vec = QPointF(-source_vec.y(), source_vec.x())
+        
+        # Draw preview of perpendicular line
+        target_mid = target.midpoint()
+        preview_length = target.length() / 2
+        
+        preview_line = PreviewLineItem(
+            target_mid - perp_vec * preview_length,
+            target_mid + perp_vec * preview_length
+        )
+        preview_line.setPen(QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.DashLine))
+        self._scene.addItem(preview_line)
+        source.preview_items.append(preview_line)
+        
+        # Draw right angle indicator
+        indicator_size = 10
+        closest_point = source.closest_point(target_mid)
+        
+        path = QPainterPath()
+        path.moveTo(closest_point)
+        path.lineTo(closest_point + source_vec * indicator_size)
+        path.lineTo(closest_point + source_vec * indicator_size + perp_vec * indicator_size)
+        
+        indicator = self._scene.addPath(
+            path,
+            QPen(Qt.GlobalColor.blue, 2)
+        )
+        source.preview_items.append(indicator)
 
     def contextMenuEvent(self, event):
         """Show context menu."""
@@ -874,4 +954,16 @@ class SketchView(QGraphicsView):
         menu.addAction("Point", lambda: self.set_tool('point'))
         menu.addAction("Line", lambda: self.set_tool('line'))
         menu.addAction("Circle", lambda: self.set_tool('circle'))
-        menu.exec(event.globalPos()) 
+        menu.exec(event.globalPos())
+
+    def _notify_update(self, entity):
+        for callback in self.update_callbacks:
+            callback(entity)
+
+    def clear_preview_items(self):
+        """Remove all preview items from the scene."""
+        for item in self.preview_items[:]:  # Create a copy of the list to avoid modification during iteration
+            if item.scene() is not None:
+                self._scene.removeItem(item)
+            self.preview_items.remove(item)
+            del item  # Explicitly delete the item 
