@@ -20,13 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 
-# Logs and databases
-*.log
-*.sqlite
-logs/
-test_results/
-
-# Environment
+# Virtual Environment
 .env
 .venv
 env/
@@ -38,9 +32,38 @@ ENV/
 .vscode/
 *.swp
 *.swo
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
 
-# OS
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+nosetests.xml
+coverage.xml
+
+# Logs
+*.log
+logs/
+log/
+
+# Local development settings
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
 # Project specific
