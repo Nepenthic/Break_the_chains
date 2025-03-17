@@ -4,6 +4,9 @@ Tests for material removal simulation.
 
 import unittest
 import numpy as np
+import time
+import psutil
+import os
 from src.core.cam.simulation import (
     MaterialSimulator,
     StockParameters,
@@ -55,13 +58,31 @@ class TestMaterialSimulation(unittest.TestCase):
             }
         ]
         
+        # Create large stock for performance testing
+        self.large_stock_params = StockParameters(
+            stock_type=StockType.RECTANGULAR,
+            dimensions=(1000.0, 1000.0, 100.0),  # Large stock
+            voxel_size=1.0
+        )
+        self.large_simulator = MaterialSimulator(self.large_stock_params)
+        
+        # Create complex toolpath for performance testing
+        self.complex_toolpath = []
+        num_points = 1000
+        for i in range(num_points):
+            t = i / (num_points - 1)
+            x = 100 * np.cos(2 * np.pi * t)
+            y = 100 * np.sin(2 * np.pi * t)
+            z = 50 * (1 - t)
+            self.complex_toolpath.append(np.array([x, y, z]))
+    
     def test_stock_initialization(self):
         """Test stock initialization for different types."""
         # Test rectangular stock dimensions
         self.assertEqual(self.rect_simulator.nx, 100)
         self.assertEqual(self.rect_simulator.ny, 50)
         self.assertEqual(self.rect_simulator.nz, 25)
-        self.assertTrue(np.all(self.rect_simulator.voxel_grid))
+        self.assertTrue(np.all(self.rect_simulator.voxel_grid.toarray()))
         
         # Test cylindrical stock dimensions and shape
         radius = self.cyl_stock_params.dimensions[0] / 2
@@ -74,10 +95,14 @@ class TestMaterialSimulation(unittest.TestCase):
                 distance = np.sqrt(x**2 + y**2)
                 
                 if distance <= radius:
-                    self.assertTrue(self.cyl_simulator.voxel_grid[i,j,0])
+                    self.assertTrue(
+                        self.cyl_simulator.voxel_grid[self.cyl_simulator._get_voxel_index(i,j,0)]
+                    )
                 else:
-                    self.assertFalse(self.cyl_simulator.voxel_grid[i,j,0])
-                    
+                    self.assertFalse(
+                        self.cyl_simulator.voxel_grid[self.cyl_simulator._get_voxel_index(i,j,0)]
+                    )
+    
     def test_single_point_removal(self):
         """Test material removal at a single point."""
         # Remove material at center point
@@ -114,10 +139,10 @@ class TestMaterialSimulation(unittest.TestCase):
                 distance = np.sqrt(i**2 + j**2)
                 if distance <= radius_voxels:
                     self.assertFalse(
-                        self.rect_simulator.voxel_grid[x,y,z],
+                        self.rect_simulator.voxel_grid[self.rect_simulator._get_voxel_index(x,y,z)],
                         f"Material not removed at ({x},{y},{z})"
                     )
-                    
+    
     def test_toolpath_simulation(self):
         """Test material removal along a toolpath."""
         tool_diameter = 10.0
@@ -155,10 +180,10 @@ class TestMaterialSimulation(unittest.TestCase):
                         distance = np.sqrt(dx**2 + dy**2)
                         if distance <= radius_voxels:
                             self.assertFalse(
-                                self.rect_simulator.voxel_grid[x,y,vz],
+                                self.rect_simulator.voxel_grid[self.rect_simulator._get_voxel_index(x,y,vz)],
                                 f"Material not removed at ({x},{y},{vz})"
                             )
-                            
+    
     def test_island_preservation(self):
         """Test that islands are preserved during material removal."""
         tool_diameter = 10.0
@@ -194,10 +219,10 @@ class TestMaterialSimulation(unittest.TestCase):
                     if self._point_in_polygon(point, voxel_points):
                         for z in range(z_min, z_max + 1):
                             self.assertTrue(
-                                self.rect_simulator.voxel_grid[x,y,z],
+                                self.rect_simulator.voxel_grid[self.rect_simulator._get_voxel_index(x,y,z)],
                                 f"Island material removed at ({x},{y},{z})"
                             )
-                            
+    
     def test_visualization(self):
         """Test visualization functionality."""
         import matplotlib.pyplot as plt
@@ -218,7 +243,80 @@ class TestMaterialSimulation(unittest.TestCase):
             
         except Exception as e:
             self.fail(f"Visualization failed: {str(e)}")
-            
+    
+    def test_performance_large_stock(self):
+        """Test performance with large stock dimensions."""
+        # Get initial memory usage
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+        
+        # Create and initialize large stock
+        start_time = time.time()
+        simulator = MaterialSimulator(self.large_stock_params)
+        init_time = time.time() - start_time
+        
+        # Simulate complex toolpath
+        start_time = time.time()
+        simulator.simulate_toolpath(
+            self.complex_toolpath,
+            tool_diameter=10.0
+        )
+        sim_time = time.time() - start_time
+        
+        # Get final memory usage
+        final_memory = process.memory_info().rss / 1024 / 1024  # MB
+        memory_increase = final_memory - initial_memory
+        
+        # Log performance metrics
+        print(f"\nPerformance Test Results:")
+        print(f"Stock Size: {self.large_stock_params.dimensions}")
+        print(f"Voxel Size: {self.large_stock_params.voxel_size}")
+        print(f"Initialization Time: {init_time:.2f} seconds")
+        print(f"Simulation Time: {sim_time:.2f} seconds")
+        print(f"Memory Usage: {memory_increase:.2f} MB")
+        
+        # Assert reasonable performance
+        self.assertLess(init_time, 5.0, "Stock initialization took too long")
+        self.assertLess(sim_time, 30.0, "Simulation took too long")
+        self.assertLess(memory_increase, 1000.0, "Memory usage too high")
+    
+    def test_performance_memory_efficiency(self):
+        """Test memory efficiency of sparse voxel storage."""
+        # Create a stock with high resolution
+        high_res_params = StockParameters(
+            stock_type=StockType.RECTANGULAR,
+            dimensions=(100.0, 100.0, 100.0),
+            voxel_size=0.1  # 1mm voxels
+        )
+        
+        # Get initial memory usage
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+        
+        # Create simulator
+        simulator = MaterialSimulator(high_res_params)
+        creation_memory = process.memory_info().rss / 1024 / 1024 - initial_memory
+        
+        # Simulate material removal
+        simulator.remove_material(
+            np.array([50.0, 50.0, 50.0]),
+            None,
+            tool_diameter=10.0
+        )
+        final_memory = process.memory_info().rss / 1024 / 1024 - initial_memory
+        
+        # Log memory metrics
+        print(f"\nMemory Efficiency Test Results:")
+        print(f"Stock Size: {high_res_params.dimensions}")
+        print(f"Voxel Size: {high_res_params.voxel_size}")
+        print(f"Creation Memory: {creation_memory:.2f} MB")
+        print(f"Final Memory: {final_memory:.2f} MB")
+        print(f"Memory Increase: {final_memory - creation_memory:.2f} MB")
+        
+        # Assert reasonable memory usage
+        self.assertLess(creation_memory, 1000.0, "Initial memory usage too high")
+        self.assertLess(final_memory - creation_memory, 100.0, "Memory increase too high")
+    
     def _point_in_polygon(self, point: np.ndarray, polygon: list) -> bool:
         """Helper method to test if a point is inside a polygon."""
         n = len(polygon)

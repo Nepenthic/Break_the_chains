@@ -4,6 +4,7 @@ Machine simulation module for real-time toolpath visualization and verification.
 
 from typing import List, Optional, Dict, Union, Tuple
 import numpy as np
+from scipy import sparse
 from dataclasses import dataclass
 from enum import Enum
 from .toolpath import ToolParameters, CuttingParameters
@@ -228,8 +229,14 @@ class MaterialSimulator:
             self.ny = int(np.ceil(diameter / self.voxel_size))
             self.nz = int(np.ceil(height / self.voxel_size))
         
-        # Initialize voxel grid (1 = material present, 0 = material removed)
-        self.voxel_grid = np.ones((self.nx, self.ny, self.nz), dtype=bool)
+        # Initialize sparse voxel grid (1 = material present, 0 = material removed)
+        # Use COO format for efficient construction, then convert to CSR for fast operations
+        self.voxel_grid = sparse.csr_matrix(
+            (np.ones(self.nx * self.ny * self.nz),
+             (np.arange(self.nx * self.ny * self.nz),
+              np.zeros(self.nx * self.ny * self.nz))),
+            shape=(self.nx * self.ny * self.nz, 1)
+        )
         
         # Set up coordinate grids for faster operations
         x = np.linspace(0, length, self.nx) if stock_params.stock_type == StockType.RECTANGULAR else \
@@ -242,10 +249,27 @@ class MaterialSimulator:
         # Initialize cylindrical stock if needed
         if stock_params.stock_type == StockType.CYLINDRICAL:
             radius = diameter / 2
-            self.voxel_grid = (self.X**2 + self.Y**2) <= radius**2
+            mask = (self.X**2 + self.Y**2) <= radius**2
+            self.voxel_grid = sparse.csr_matrix(
+                (mask.flatten(),
+                 (np.arange(self.nx * self.ny * self.nz),
+                  np.zeros(self.nx * self.ny * self.nz))),
+                shape=(self.nx * self.ny * self.nz, 1)
+            )
         
         # Store original stock for visualization
         self.original_stock = self.voxel_grid.copy()
+        
+    def _get_voxel_index(self, x: int, y: int, z: int) -> int:
+        """Convert 3D voxel coordinates to 1D index."""
+        return x + self.nx * (y + self.ny * z)
+        
+    def _get_voxel_coords(self, index: int) -> Tuple[int, int, int]:
+        """Convert 1D index to 3D voxel coordinates."""
+        z = index // (self.nx * self.ny)
+        y = (index % (self.nx * self.ny)) // self.nx
+        x = index % self.nx
+        return x, y, z
         
     def remove_material(
         self,
@@ -271,11 +295,6 @@ class MaterialSimulator:
         # Calculate tool radius in voxels
         tool_radius_voxels = int(np.ceil((tool_diameter / 2) / self.voxel_size))
         
-        # Create a mask for the tool's circular cross-section
-        y, x = np.ogrid[-tool_radius_voxels:tool_radius_voxels+1, 
-                        -tool_radius_voxels:tool_radius_voxels+1]
-        tool_mask = x*x + y*y <= tool_radius_voxels*tool_radius_voxels
-        
         # Calculate affected voxel ranges
         x_min = max(0, vx - tool_radius_voxels)
         x_max = min(self.nx, vx + tool_radius_voxels + 1)
@@ -284,22 +303,15 @@ class MaterialSimulator:
         z_min = max(0, vz)
         z_max = min(self.nz, vz + 1)
         
-        # Extract the region to modify
-        region = self.voxel_grid[x_min:x_max, y_min:y_max, z_min:z_max]
-        
-        # Apply tool mask to remove material
-        mask_x_offset = tool_radius_voxels - (vx - x_min)
-        mask_y_offset = tool_radius_voxels - (vy - y_min)
-        mask_slice = tool_mask[
-            max(0, mask_x_offset):mask_x_offset + region.shape[0],
-            max(0, mask_y_offset):mask_y_offset + region.shape[1]
-        ]
+        # Create a mask for the tool's circular cross-section
+        y, x = np.ogrid[-tool_radius_voxels:tool_radius_voxels+1, 
+                        -tool_radius_voxels:tool_radius_voxels+1]
+        tool_mask = x*x + y*y <= tool_radius_voxels*tool_radius_voxels
         
         # Check for islands before removing material
         if islands:
             # Create a mask for protected areas (islands)
-            protected = np.zeros_like(region, dtype=bool)
-            
+            protected_indices = []
             for island in islands:
                 if island['z_min'] <= tool_position[2] <= island['z_max']:
                     # Convert island points to voxel coordinates
@@ -315,14 +327,44 @@ class MaterialSimulator:
                     mask = self._points_in_polygon(points, island_points)
                     mask = mask.reshape(XX.shape)
                     
-                    # Add to protected areas
-                    protected |= mask[..., np.newaxis]
+                    # Add protected indices
+                    for i in range(x_min, x_max):
+                        for j in range(y_min, y_max):
+                            if mask[i-x_min, j-y_min]:
+                                for z in range(z_min, z_max):
+                                    protected_indices.append(self._get_voxel_index(i, j, z))
             
-            # Only remove material in unprotected areas
-            region[~protected] &= ~mask_slice[..., np.newaxis]
+            # Convert protected indices to sparse matrix
+            protected = sparse.csr_matrix(
+                (np.ones(len(protected_indices)),
+                 (protected_indices, np.zeros(len(protected_indices)))),
+                shape=(self.nx * self.ny * self.nz, 1)
+            )
+            
+            # Remove material only in unprotected areas
+            self.voxel_grid = self.voxel_grid.multiply(
+                ~(protected.astype(bool))
+            )
         else:
             # Remove material where the tool intersects
-            region &= ~mask_slice[..., np.newaxis]
+            indices_to_remove = []
+            for i in range(x_min, x_max):
+                for j in range(y_min, y_max):
+                    dx = i - vx
+                    dy = j - vy
+                    if dx*dx + dy*dy <= tool_radius_voxels*tool_radius_voxels:
+                        for z in range(z_min, z_max):
+                            indices_to_remove.append(self._get_voxel_index(i, j, z))
+            
+            # Convert indices to sparse matrix and remove material
+            remove_mask = sparse.csr_matrix(
+                (np.ones(len(indices_to_remove)),
+                 (indices_to_remove, np.zeros(len(indices_to_remove)))),
+                shape=(self.nx * self.ny * self.nz, 1)
+            )
+            self.voxel_grid = self.voxel_grid.multiply(
+                ~(remove_mask.astype(bool))
+            )
     
     def simulate_toolpath(
         self,
@@ -385,34 +427,36 @@ class MaterialSimulator:
             vertices.extend([v1, v2, v3, v4])
             faces.append([face_idx, face_idx+1, face_idx+2, face_idx+3])
         
+        # Get non-zero indices from sparse matrix
+        remaining_indices = self.voxel_grid.nonzero()[0]
+        
         # Create mesh for remaining material
-        for i in range(self.nx-1):
-            for j in range(self.ny-1):
-                for k in range(self.nz-1):
-                    if self.voxel_grid[i,j,k]:
-                        # Add cube vertices and faces
-                        v000 = np.array([self.X[i,j,k], self.Y[i,j,k], self.Z[i,j,k]])
-                        v001 = np.array([self.X[i,j,k+1], self.Y[i,j,k+1], self.Z[i,j,k+1]])
-                        v010 = np.array([self.X[i,j+1,k], self.Y[i,j+1,k], self.Z[i,j+1,k]])
-                        v011 = np.array([self.X[i,j+1,k+1], self.Y[i,j+1,k+1], self.Z[i,j+1,k+1]])
-                        v100 = np.array([self.X[i+1,j,k], self.Y[i+1,j,k], self.Z[i+1,j,k]])
-                        v101 = np.array([self.X[i+1,j,k+1], self.Y[i+1,j,k+1], self.Z[i+1,j,k+1]])
-                        v110 = np.array([self.X[i+1,j+1,k], self.Y[i+1,j+1,k], self.Z[i+1,j+1,k]])
-                        v111 = np.array([self.X[i+1,j+1,k+1], self.Y[i+1,j+1,k+1], self.Z[i+1,j+1,k+1]])
-                        
-                        # Add faces (only if they're exposed)
-                        if i == 0 or not self.voxel_grid[i-1,j,k]:
-                            add_face(v000, v001, v011, v010)
-                        if i == self.nx-2 or not self.voxel_grid[i+1,j,k]:
-                            add_face(v100, v101, v111, v110)
-                        if j == 0 or not self.voxel_grid[i,j-1,k]:
-                            add_face(v000, v001, v101, v100)
-                        if j == self.ny-2 or not self.voxel_grid[i,j+1,k]:
-                            add_face(v010, v011, v111, v110)
-                        if k == 0 or not self.voxel_grid[i,j,k-1]:
-                            add_face(v000, v010, v110, v100)
-                        if k == self.nz-2 or not self.voxel_grid[i,j,k+1]:
-                            add_face(v001, v011, v111, v101)
+        for idx in remaining_indices:
+            i, j, k = self._get_voxel_coords(idx)
+            
+            # Add cube vertices and faces
+            v000 = np.array([self.X[i,j,k], self.Y[i,j,k], self.Z[i,j,k]])
+            v001 = np.array([self.X[i,j,k+1], self.Y[i,j,k+1], self.Z[i,j,k+1]])
+            v010 = np.array([self.X[i,j+1,k], self.Y[i,j+1,k], self.Z[i,j+1,k]])
+            v011 = np.array([self.X[i,j+1,k+1], self.Y[i,j+1,k+1], self.Z[i,j+1,k+1]])
+            v100 = np.array([self.X[i+1,j,k], self.Y[i+1,j,k], self.Z[i+1,j,k]])
+            v101 = np.array([self.X[i+1,j,k+1], self.Y[i+1,j,k+1], self.Z[i+1,j,k+1]])
+            v110 = np.array([self.X[i+1,j+1,k], self.Y[i+1,j+1,k], self.Z[i+1,j+1,k]])
+            v111 = np.array([self.X[i+1,j+1,k+1], self.Y[i+1,j+1,k+1], self.Z[i+1,j+1,k+1]])
+            
+            # Check neighbors to determine which faces to add
+            if i == 0 or not self.voxel_grid[self._get_voxel_index(i-1,j,k)]:
+                add_face(v000, v001, v011, v010)
+            if i == self.nx-2 or not self.voxel_grid[self._get_voxel_index(i+1,j,k)]:
+                add_face(v100, v101, v111, v110)
+            if j == 0 or not self.voxel_grid[self._get_voxel_index(i,j-1,k)]:
+                add_face(v000, v001, v101, v100)
+            if j == self.ny-2 or not self.voxel_grid[self._get_voxel_index(i,j+1,k)]:
+                add_face(v010, v011, v111, v110)
+            if k == 0 or not self.voxel_grid[self._get_voxel_index(i,j,k-1)]:
+                add_face(v000, v010, v110, v100)
+            if k == self.nz-2 or not self.voxel_grid[self._get_voxel_index(i,j,k+1)]:
+                add_face(v001, v011, v111, v101)
         
         # Create mesh collection
         poly = Poly3DCollection(faces)
