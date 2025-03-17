@@ -11,6 +11,9 @@ from .toolpath import ToolParameters, CuttingParameters
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 class SimulationType(Enum):
     """Types of simulation available."""
@@ -260,6 +263,10 @@ class MaterialSimulator:
         # Store original stock for visualization
         self.original_stock = self.voxel_grid.copy()
         
+        # Initialize thread safety
+        self.voxel_lock = threading.Lock()
+        self.num_workers = max(1, multiprocessing.cpu_count() - 1)  # Leave one core free
+        
     def _get_voxel_index(self, x: int, y: int, z: int) -> int:
         """Convert 3D voxel coordinates to 1D index."""
         return x + self.nx * (y + self.ny * z)
@@ -287,84 +294,112 @@ class MaterialSimulator:
             tool_diameter: Diameter of the cutting tool
             islands: Optional list of islands to preserve
         """
-        # Convert tool position to voxel coordinates
-        vx = int(tool_position[0] / self.voxel_size)
-        vy = int(tool_position[1] / self.voxel_size)
-        vz = int(tool_position[2] / self.voxel_size)
-        
-        # Calculate tool radius in voxels
-        tool_radius_voxels = int(np.ceil((tool_diameter / 2) / self.voxel_size))
-        
-        # Calculate affected voxel ranges
-        x_min = max(0, vx - tool_radius_voxels)
-        x_max = min(self.nx, vx + tool_radius_voxels + 1)
-        y_min = max(0, vy - tool_radius_voxels)
-        y_max = min(self.ny, vy + tool_radius_voxels + 1)
-        z_min = max(0, vz)
-        z_max = min(self.nz, vz + 1)
-        
-        # Create a mask for the tool's circular cross-section
-        y, x = np.ogrid[-tool_radius_voxels:tool_radius_voxels+1, 
-                        -tool_radius_voxels:tool_radius_voxels+1]
-        tool_mask = x*x + y*y <= tool_radius_voxels*tool_radius_voxels
-        
-        # Check for islands before removing material
-        if islands:
-            # Create a mask for protected areas (islands)
-            protected_indices = []
-            for island in islands:
-                if island['z_min'] <= tool_position[2] <= island['z_max']:
-                    # Convert island points to voxel coordinates
-                    island_points = np.array(island['points']) / self.voxel_size
-                    
-                    # Create a polygon mask for this island
-                    y_coords = np.arange(y_min, y_max)
-                    x_coords = np.arange(x_min, x_max)
-                    XX, YY = np.meshgrid(x_coords, y_coords)
-                    points = np.column_stack((XX.flatten(), YY.flatten()))
-                    
-                    # Use points_in_polygon to create island mask
-                    mask = self._points_in_polygon(points, island_points)
-                    mask = mask.reshape(XX.shape)
-                    
-                    # Add protected indices
-                    for i in range(x_min, x_max):
-                        for j in range(y_min, y_max):
-                            if mask[i-x_min, j-y_min]:
-                                for z in range(z_min, z_max):
-                                    protected_indices.append(self._get_voxel_index(i, j, z))
+        with self.voxel_lock:
+            # Convert tool position to voxel coordinates
+            vx = int(tool_position[0] / self.voxel_size)
+            vy = int(tool_position[1] / self.voxel_size)
+            vz = int(tool_position[2] / self.voxel_size)
             
-            # Convert protected indices to sparse matrix
-            protected = sparse.csr_matrix(
-                (np.ones(len(protected_indices)),
-                 (protected_indices, np.zeros(len(protected_indices)))),
-                shape=(self.nx * self.ny * self.nz, 1)
-            )
+            # Calculate tool radius in voxels
+            tool_radius_voxels = int(np.ceil((tool_diameter / 2) / self.voxel_size))
             
-            # Remove material only in unprotected areas
-            self.voxel_grid = self.voxel_grid.multiply(
-                ~(protected.astype(bool))
-            )
-        else:
-            # Remove material where the tool intersects
-            indices_to_remove = []
-            for i in range(x_min, x_max):
-                for j in range(y_min, y_max):
-                    dx = i - vx
-                    dy = j - vy
-                    if dx*dx + dy*dy <= tool_radius_voxels*tool_radius_voxels:
-                        for z in range(z_min, z_max):
-                            indices_to_remove.append(self._get_voxel_index(i, j, z))
+            # Calculate affected voxel ranges
+            x_min = max(0, vx - tool_radius_voxels)
+            x_max = min(self.nx, vx + tool_radius_voxels + 1)
+            y_min = max(0, vy - tool_radius_voxels)
+            y_max = min(self.ny, vy + tool_radius_voxels + 1)
+            z_min = max(0, vz)
+            z_max = min(self.nz, vz + 1)
             
-            # Convert indices to sparse matrix and remove material
-            remove_mask = sparse.csr_matrix(
-                (np.ones(len(indices_to_remove)),
-                 (indices_to_remove, np.zeros(len(indices_to_remove)))),
-                shape=(self.nx * self.ny * self.nz, 1)
-            )
-            self.voxel_grid = self.voxel_grid.multiply(
-                ~(remove_mask.astype(bool))
-            )
+            # Create a mask for the tool's circular cross-section
+            y, x = np.ogrid[-tool_radius_voxels:tool_radius_voxels+1, 
+                            -tool_radius_voxels:tool_radius_voxels+1]
+            tool_mask = x*x + y*y <= tool_radius_voxels*tool_radius_voxels
+            
+            # Check for islands before removing material
+            if islands:
+                # Create a mask for protected areas (islands)
+                protected_indices = []
+                for island in islands:
+                    if island['z_min'] <= tool_position[2] <= island['z_max']:
+                        # Convert island points to voxel coordinates
+                        island_points = np.array(island['points']) / self.voxel_size
+                        
+                        # Create a polygon mask for this island
+                        y_coords = np.arange(y_min, y_max)
+                        x_coords = np.arange(x_min, x_max)
+                        XX, YY = np.meshgrid(x_coords, y_coords)
+                        points = np.column_stack((XX.flatten(), YY.flatten()))
+                        
+                        # Use points_in_polygon to create island mask
+                        mask = self._points_in_polygon(points, island_points)
+                        mask = mask.reshape(XX.shape)
+                        
+                        # Add protected indices
+                        for i in range(x_min, x_max):
+                            for j in range(y_min, y_max):
+                                if mask[i-x_min, j-y_min]:
+                                    for z in range(z_min, z_max):
+                                        protected_indices.append(self._get_voxel_index(i, j, z))
+                
+                # Convert protected indices to sparse matrix
+                protected = sparse.csr_matrix(
+                    (np.ones(len(protected_indices)),
+                     (protected_indices, np.zeros(len(protected_indices)))),
+                    shape=(self.nx * self.ny * self.nz, 1)
+                )
+                
+                # Remove material only in unprotected areas
+                self.voxel_grid = self.voxel_grid.multiply(
+                    ~(protected.astype(bool))
+                )
+            else:
+                # Remove material where the tool intersects
+                indices_to_remove = []
+                for i in range(x_min, x_max):
+                    for j in range(y_min, y_max):
+                        dx = i - vx
+                        dy = j - vy
+                        if dx*dx + dy*dy <= tool_radius_voxels*tool_radius_voxels:
+                            for z in range(z_min, z_max):
+                                indices_to_remove.append(self._get_voxel_index(i, j, z))
+                
+                # Convert indices to sparse matrix and remove material
+                remove_mask = sparse.csr_matrix(
+                    (np.ones(len(indices_to_remove)),
+                     (indices_to_remove, np.zeros(len(indices_to_remove)))),
+                    shape=(self.nx * self.ny * self.nz, 1)
+                )
+                self.voxel_grid = self.voxel_grid.multiply(
+                    ~(remove_mask.astype(bool))
+                )
+    
+    def _process_segment(
+        self,
+        segment: List[np.ndarray],
+        tool_diameter: float,
+        islands: Optional[List[Dict[str, Union[List[np.ndarray], float]]]] = None
+    ) -> None:
+        """
+        Process a segment of the toolpath.
+        
+        Args:
+            segment: List of tool positions in the segment
+            tool_diameter: Diameter of the cutting tool
+            islands: Optional list of islands to preserve
+        """
+        for i in range(len(segment) - 1):
+            current_pos = segment[i]
+            next_pos = segment[i + 1]
+            
+            # Calculate direction vector
+            direction = next_pos - current_pos
+            
+            # Interpolate positions along the path
+            num_steps = max(1, int(np.ceil(np.linalg.norm(direction) / self.voxel_size)))
+            for t in np.linspace(0, 1, num_steps):
+                pos = current_pos + t * direction
+                self.remove_material(pos, direction, tool_diameter, islands)
     
     def simulate_toolpath(
         self,
@@ -382,22 +417,22 @@ class MaterialSimulator:
             islands: Optional list of islands to preserve
             update_callback: Optional callback function for visualization updates
         """
-        for i in range(len(toolpath) - 1):
-            current_pos = toolpath[i]
-            next_pos = toolpath[i + 1]
+        # Split toolpath into segments for parallel processing
+        segment_size = max(1, len(toolpath) // (self.num_workers * 4))  # Ensure enough segments for parallelization
+        segments = [toolpath[i:i + segment_size] for i in range(0, len(toolpath), segment_size)]
+        
+        # Process segments in parallel
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = [
+                executor.submit(self._process_segment, segment, tool_diameter, islands)
+                for segment in segments
+            ]
             
-            # Calculate direction vector
-            direction = next_pos - current_pos
-            
-            # Interpolate positions along the path
-            num_steps = max(1, int(np.ceil(np.linalg.norm(direction) / self.voxel_size)))
-            for t in np.linspace(0, 1, num_steps):
-                pos = current_pos + t * direction
-                self.remove_material(pos, direction, tool_diameter, islands)
-            
-            # Call update callback if provided
-            if update_callback and i % 10 == 0:  # Update every 10 moves
-                update_callback(self.voxel_grid)
+            # Wait for all segments to complete and update visualization if needed
+            for i, future in enumerate(futures):
+                future.result()
+                if update_callback and i % 10 == 0:  # Update every 10 segments
+                    update_callback(self.voxel_grid)
     
     def visualize(
         self,

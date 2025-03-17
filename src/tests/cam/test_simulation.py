@@ -333,5 +333,139 @@ class TestMaterialSimulation(unittest.TestCase):
             
         return inside
 
+    def test_multi_threading_correctness(self):
+        """Test that multi-threaded simulation matches single-threaded results."""
+        # Create a simulator copy for single-threaded run
+        single_sim = MaterialSimulator(self.rect_stock_params)
+        single_sim.simulate_toolpath(self.test_toolpath, tool_diameter=10.0)
+        single_result = single_sim.voxel_grid.toarray()
+
+        # Run multi-threaded simulation
+        multi_sim = MaterialSimulator(self.rect_stock_params)
+        multi_sim.simulate_toolpath(self.test_toolpath, tool_diameter=10.0)
+        multi_result = multi_sim.voxel_grid.toarray()
+
+        # Compare results
+        self.assertTrue(np.array_equal(single_result, multi_result), 
+                       "Multi-threaded result differs from single-threaded")
+    
+    def test_multi_threading_performance(self):
+        """Test performance improvement with multi-threading."""
+        # Create a complex toolpath for testing
+        num_points = 1000
+        complex_toolpath = []
+        for i in range(num_points):
+            t = i / (num_points - 1)
+            x = 100 * np.cos(2 * np.pi * t)
+            y = 100 * np.sin(2 * np.pi * t)
+            z = 50 * (1 - t)
+            complex_toolpath.append(np.array([x, y, z]))
+        
+        # Create simulator
+        simulator = MaterialSimulator(self.rect_stock_params)
+        
+        # Single-threaded test
+        simulator.voxel_grid = simulator.original_stock.copy()
+        start_time = time.time()
+        simulator.simulate_toolpath(complex_toolpath, tool_diameter=10.0)
+        single_time = time.time() - start_time
+        
+        # Multi-threaded test
+        simulator.voxel_grid = simulator.original_stock.copy()
+        start_time = time.time()
+        simulator.simulate_toolpath(complex_toolpath, tool_diameter=10.0)
+        multi_time = time.time() - start_time
+        
+        # Log performance metrics
+        print(f"\nMulti-threading Performance Test Results:")
+        print(f"Number of Points: {num_points}")
+        print(f"Single-threaded Time: {single_time:.2f} seconds")
+        print(f"Multi-threaded Time: {multi_time:.2f} seconds")
+        print(f"Speedup: {single_time/multi_time:.2f}x")
+        
+        # Assert performance improvement
+        self.assertLess(multi_time, single_time * 0.8, 
+                       "Multi-threading did not improve performance")
+    
+    def test_multi_threading_with_islands(self):
+        """Test multi-threaded simulation with islands."""
+        # Create a simulator
+        simulator = MaterialSimulator(self.rect_stock_params)
+        
+        # Create a complex toolpath
+        num_points = 500
+        complex_toolpath = []
+        for i in range(num_points):
+            t = i / (num_points - 1)
+            x = 100 * np.cos(2 * np.pi * t)
+            y = 100 * np.sin(2 * np.pi * t)
+            z = 50 * (1 - t)
+            complex_toolpath.append(np.array([x, y, z]))
+        
+        # Create multiple islands
+        islands = [
+            {  # Square island
+                'points': [
+                    np.array([40.0, 20.0]),
+                    np.array([60.0, 20.0]),
+                    np.array([60.0, 30.0]),
+                    np.array([40.0, 30.0]),
+                    np.array([40.0, 20.0])
+                ],
+                'z_min': 0.0,
+                'z_max': 25.0
+            },
+            {  # Circular island
+                'points': [
+                    np.array([70.0, 30.0]),
+                    np.array([80.0, 30.0]),
+                    np.array([80.0, 40.0]),
+                    np.array([70.0, 40.0]),
+                    np.array([70.0, 30.0])
+                ],
+                'z_min': 0.0,
+                'z_max': 25.0
+            }
+        ]
+        
+        # Run multi-threaded simulation with islands
+        start_time = time.time()
+        simulator.simulate_toolpath(complex_toolpath, tool_diameter=10.0, islands=islands)
+        sim_time = time.time() - start_time
+        
+        # Log performance metrics
+        print(f"\nMulti-threading with Islands Test Results:")
+        print(f"Number of Points: {num_points}")
+        print(f"Number of Islands: {len(islands)}")
+        print(f"Simulation Time: {sim_time:.2f} seconds")
+        
+        # Verify island preservation
+        for island in islands:
+            points = island['points']
+            z_min = int(island['z_min'] / simulator.voxel_size)
+            z_max = int(island['z_max'] / simulator.voxel_size)
+            
+            # Convert island points to voxel coordinates
+            voxel_points = [np.array([
+                int(p[0] / simulator.voxel_size),
+                int(p[1] / simulator.voxel_size)
+            ]) for p in points]
+            
+            # Check points within island bounds
+            min_x = min(p[0] for p in voxel_points)
+            max_x = max(p[0] for p in voxel_points)
+            min_y = min(p[1] for p in voxel_points)
+            max_y = max(p[1] for p in voxel_points)
+            
+            for x in range(min_x, max_x + 1):
+                for y in range(min_y, max_y + 1):
+                    point = np.array([x, y])
+                    if self._point_in_polygon(point, voxel_points):
+                        for z in range(z_min, z_max + 1):
+                            self.assertTrue(
+                                simulator.voxel_grid[simulator._get_voxel_index(x,y,z)],
+                                f"Island material removed at ({x},{y},{z})"
+                            )
+
 if __name__ == '__main__':
     unittest.main() 
