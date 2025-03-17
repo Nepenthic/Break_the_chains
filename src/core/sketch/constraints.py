@@ -3,9 +3,44 @@ Geometric constraint solver for 2D sketches.
 """
 
 from typing import List, Dict, Any, Optional, Union, Tuple
+from enum import Enum, auto
 import numpy as np
 from scipy.optimize import minimize
 from .entities import Point2D, Line2D, Circle2D, Arc2D
+
+class ConstraintType(Enum):
+    """Types of geometric constraints supported by the sketch system."""
+    COINCIDENT = auto()
+    PARALLEL = auto()
+    PERPENDICULAR = auto()
+    HORIZONTAL = auto()
+    VERTICAL = auto()
+    DISTANCE = auto()
+    ANGLE = auto()
+    EQUAL = auto()
+    TANGENT = auto()
+    RADIUS = auto()
+    CONCENTRIC = auto()
+
+class Constraint:
+    """Represents a geometric constraint between sketch entities."""
+    
+    def __init__(self, constraint_type: ConstraintType, entities: List[Any], value: Optional[float] = None):
+        """Initialize a new constraint.
+        
+        Args:
+            constraint_type: Type of geometric constraint
+            entities: List of entities involved in the constraint
+            value: Optional numeric value for the constraint (e.g. distance, angle)
+        """
+        self.type = constraint_type
+        self.entities = entities
+        self.value = value
+        self.is_satisfied = False
+        
+    def __repr__(self) -> str:
+        """String representation of the constraint."""
+        return f"Constraint({self.type}, entities={len(self.entities)}, value={self.value})"
 
 class ConstraintSolver:
     """Solver for geometric constraints in 2D sketches."""

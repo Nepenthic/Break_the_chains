@@ -1,23 +1,19 @@
 """
-Core sketch system module for 2D constraint-based sketching.
+Core sketch module for geometric constraint system.
 """
 
 from .sketch_manager import SketchManager
-from .constraints import ConstraintSolver
-from .entities import (
-    Point2D,
-    Line2D,
-    Arc2D,
-    Circle2D,
-    Spline2D
-)
+from .entities import Point2D, Line2D, Circle2D, Arc2D, Spline2D
+from .constraints import ConstraintType, ConstraintSolver, Constraint
 
 __all__ = [
     'SketchManager',
-    'ConstraintSolver',
     'Point2D',
     'Line2D',
-    'Arc2D',
     'Circle2D',
-    'Spline2D'
+    'Arc2D',
+    'Spline2D',
+    'ConstraintType',
+    'ConstraintSolver',
+    'Constraint'
 ] 

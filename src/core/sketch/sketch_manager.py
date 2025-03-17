@@ -3,7 +3,7 @@ Sketch manager module for handling 2D sketch creation and management.
 """
 
 import numpy as np
-from typing import List, Dict, Optional, Tuple, Union
+from typing import List, Dict, Optional, Tuple, Union, Callable
 from dataclasses import dataclass, field
 from .entities import Point2D, Line2D, Arc2D, Circle2D, Spline2D
 from .constraints import ConstraintSolver
@@ -30,6 +30,20 @@ class SketchManager:
         self.constraint_solver = ConstraintSolver()
         self.active_plane = SketchPlane()
         self._next_id = 1
+        self._update_callbacks: List[Callable[[str, Union[Point2D, Line2D, Arc2D, Circle2D, Spline2D]], None]] = []
+
+    def register_update_callback(self, callback: Callable[[str, Union[Point2D, Line2D, Arc2D, Circle2D, Spline2D]], None]) -> None:
+        """Register a callback to be called when an entity is updated.
+        
+        Args:
+            callback: Function to be called with entity_id and new geometry when an entity is updated
+        """
+        self._update_callbacks.append(callback)
+
+    def _notify_update(self, entity_id: str, entity: Union[Point2D, Line2D, Arc2D, Circle2D, Spline2D]) -> None:
+        """Notify all registered callbacks about an entity update."""
+        for callback in self._update_callbacks:
+            callback(entity_id, entity)
 
     def create_sketch_plane(self, origin: np.ndarray, normal: np.ndarray, 
                           x_axis: Optional[np.ndarray] = None) -> SketchPlane:
@@ -121,12 +135,17 @@ class SketchManager:
 
     def update_entity(self, entity_id: str, 
                      new_geometry: Union[Point2D, Line2D, Arc2D, Circle2D, Spline2D]) -> bool:
-        """Update an entity's geometry."""
-        if entity_id in self.entities:
-            if isinstance(new_geometry, type(self.entities[entity_id])):
-                self.entities[entity_id] = new_geometry
-                return True
-        return False
+        """Update an existing entity with new geometry."""
+        if entity_id not in self.entities:
+            return False
+        
+        old_entity = self.entities[entity_id]
+        if not isinstance(new_geometry, type(old_entity)):
+            return False
+        
+        self.entities[entity_id] = new_geometry
+        self._notify_update(entity_id, new_geometry)
+        return True
 
     def delete_entity(self, entity_id: str) -> bool:
         """Delete an entity from the sketch."""
