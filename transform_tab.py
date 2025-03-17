@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton,
                            QLineEdit, QComboBox, QDialog, QInputDialog,
                            QDateTimeEdit, QSpinBox, QScrollArea,
                            QFrame, QToolButton, QProgressBar)
-from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, QTimer, QPropertyAnimation, QSequentialAnimationGroup, QAbstractAnimation
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, QTimer, QPropertyAnimation, QSequentialAnimationGroup, QAbstractAnimation, QPointF
+from PyQt6.QtGui import QIcon, QShortcut, QKeySequence, QPainterPath, QPen, QColor, QRectF, QGraphicsPathItem, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsTextItem
 import json
 import os
 from typing import Dict, List, Set, Any, Optional
@@ -228,6 +228,8 @@ class TransformTab(QWidget):
     PERFORMANCE_THRESHOLD = 500  # milliseconds for slow operation warning
     MAX_STATUS_AXES = 3  # Maximum number of axes to show in status before truncating
     ANIMATION_BATCH_SIZE = 5  # Number of UI updates to batch during transitions
+    HANDLE_SIZE = 10  # Size of draggable handles in pixels
+    SCALE_SENSITIVITY = 0.01  # Sensitivity factor for scale dragging
     
     # Signals
     transformApplied = pyqtSignal(str, dict)  # (transform_type, transform_params)
@@ -250,6 +252,14 @@ class TransformTab(QWidget):
         self._mode_transition_timer.setSingleShot(True)
         self._mode_transition_timer.timeout.connect(self._complete_mode_transition)
         self._last_mode_switch_time = 0
+        
+        # Dragging state
+        self._dragging = False
+        self._drag_handle = None
+        self._drag_start = None
+        self._rotation_handle = None
+        self._scale_handles = []
+        self._rotation_center = None
         
         self._setup_ui()
         self.connect_signals()
@@ -585,21 +595,35 @@ class TransformTab(QWidget):
     def setup_ui(self):
         layout = QVBoxLayout(self)
         
-        # Transform mode selection
+        # Transform mode selection with enhanced visual feedback
         mode_group = QGroupBox("Transform Mode")
         mode_layout = QVBoxLayout()
         
         # Create radio buttons for transform modes with shortcuts and tooltips
         self.mode_group = QButtonGroup()
         modes = [
-            ("Translate (T)", "translate", "Move objects along axes (T)"),
-            ("Rotate (R)", "rotate", "Rotate objects around axes (R)"),
-            ("Scale (S)", "scale", "Scale objects along axes (S)")
+            ("Translate (T)", "translate", "Move objects along axes (T)\nUse arrow keys or drag to move"),
+            ("Rotate (R)", "rotate", "Rotate objects around axes (R)\nHold Shift for precise rotation"),
+            ("Scale (S)", "scale", "Scale objects along axes (S)\nHold Shift for uniform scaling")
         ]
         
         for text, mode, tooltip in modes:
             radio = QRadioButton(text)
             radio.setToolTip(tooltip)
+            radio.setStyleSheet("""
+                QRadioButton {
+                    padding: 8px;
+                    border-radius: 4px;
+                    margin: 2px;
+                }
+                QRadioButton:hover {
+                    background-color: rgba(33, 150, 243, 0.1);
+                }
+                QRadioButton:checked {
+                    background-color: #E3F2FD;
+                    border: 1px solid #2196F3;
+                }
+            """)
             self.mode_group.addButton(radio)
             mode_layout.addWidget(radio)
             radio.clicked.connect(lambda checked, m=mode: self.onModeChanged(m))
@@ -607,332 +631,169 @@ class TransformTab(QWidget):
         mode_group.setLayout(mode_layout)
         layout.addWidget(mode_group)
         
-        # History panel with enhanced search and filters
-        history_group = QGroupBox("Transform History")
-        history_layout = QVBoxLayout()
+        # Quick transform buttons with tooltips and visual feedback
+        quick_transform_group = QGroupBox("Quick Transforms")
+        quick_transform_layout = QHBoxLayout()
         
-        # Search and filter controls
-        filter_layout = QGridLayout()
+        # Common button style
+        button_style = """
+            QPushButton {
+                padding: 8px;
+                border-radius: 4px;
+                margin: 2px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: rgba(33, 150, 243, 0.1);
+            }
+            QPushButton:pressed {
+                background-color: rgba(33, 150, 243, 0.2);
+            }
+        """
         
-        # Search box
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search history...")
-        self.search_box.textChanged.connect(self.onSearchTextChanged)
-        self.search_box.setToolTip("Search by transform type, axis, or value")
-        filter_layout.addWidget(self.search_box, 0, 0, 1, 2)
+        # Flip horizontal
+        self.flip_h_button = QPushButton("Flip H")
+        self.flip_h_button.setToolTip("Flip horizontally (Ctrl+H)\nMirrors the object along the X axis")
+        self.flip_h_button.setStyleSheet(button_style)
+        self.flip_h_button.clicked.connect(lambda: self.quickTransform("flip_h"))
+        quick_transform_layout.addWidget(self.flip_h_button)
         
-        # Transform type filter
-        type_label = QLabel("Type:")
-        self.type_filter = QComboBox()
-        self.type_filter.addItems(["All", "Translate", "Rotate", "Scale"])
-        self.type_filter.currentTextChanged.connect(self.onFilterChanged)
-        self.type_filter.setToolTip("Filter by transform type")
-        filter_layout.addWidget(type_label, 1, 0)
-        filter_layout.addWidget(self.type_filter, 1, 1)
+        # Flip vertical
+        self.flip_v_button = QPushButton("Flip V")
+        self.flip_v_button.setToolTip("Flip vertically (Ctrl+J)\nMirrors the object along the Y axis")
+        self.flip_v_button.setStyleSheet(button_style)
+        self.flip_v_button.clicked.connect(lambda: self.quickTransform("flip_v"))
+        quick_transform_layout.addWidget(self.flip_v_button)
         
-        # Axis filter
-        axis_label = QLabel("Axis:")
-        self.axis_filter = QComboBox()
-        self.axis_filter.addItems(["All", "X", "Y", "Z"])
-        self.axis_filter.currentTextChanged.connect(self.onFilterChanged)
-        self.axis_filter.setToolTip("Filter by axis")
-        filter_layout.addWidget(axis_label, 2, 0)
-        filter_layout.addWidget(self.axis_filter, 2, 1)
+        # Rotate 90° clockwise
+        self.rotate_cw_button = QPushButton("Rotate CW")
+        self.rotate_cw_button.setToolTip("Rotate 90° clockwise (Ctrl+Shift+R)\nQuick rotation for precise alignment")
+        self.rotate_cw_button.setStyleSheet(button_style)
+        self.rotate_cw_button.clicked.connect(lambda: self.quickTransform("rotate_90_cw"))
+        quick_transform_layout.addWidget(self.rotate_cw_button)
         
-        # Date range filter
-        date_label = QLabel("Date Range:")
-        filter_layout.addWidget(date_label, 3, 0)
-        date_layout = QHBoxLayout()
+        # Rotate 90° counter-clockwise
+        self.rotate_ccw_button = QPushButton("Rotate CCW")
+        self.rotate_ccw_button.setToolTip("Rotate 90° counter-clockwise (Ctrl+Shift+L)\nQuick rotation for precise alignment")
+        self.rotate_ccw_button.setStyleSheet(button_style)
+        self.rotate_ccw_button.clicked.connect(lambda: self.quickTransform("rotate_90_ccw"))
+        quick_transform_layout.addWidget(self.rotate_ccw_button)
         
-        self.date_start = QDateTimeEdit()
-        self.date_start.setCalendarPopup(True)
-        self.date_start.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.date_start.dateTimeChanged.connect(lambda: self.onFilterChanged("date"))
+        # Reset transform
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.setToolTip("Reset all transformations (Ctrl+R)\nReturns object to its original state")
+        self.reset_button.setStyleSheet(button_style)
+        self.reset_button.clicked.connect(self.reset_transform_values)
+        quick_transform_layout.addWidget(self.reset_button)
         
-        self.date_end = QDateTimeEdit()
-        self.date_end.setCalendarPopup(True)
-        self.date_end.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.date_end.setDateTime(QDateTime.currentDateTime())
-        self.date_end.dateTimeChanged.connect(lambda: self.onFilterChanged("date"))
+        quick_transform_group.setLayout(quick_transform_layout)
+        layout.addWidget(quick_transform_group)
         
-        date_layout.addWidget(self.date_start)
-        date_layout.addWidget(QLabel("to"))
-        date_layout.addWidget(self.date_end)
-        filter_layout.addLayout(date_layout, 3, 1)
+        # Status label for visual feedback
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("""
+            QLabel {
+                color: #2196F3;
+                padding: 4px;
+                font-size: 10pt;
+            }
+        """)
+        layout.addWidget(self.status_label)
         
-        # Value range filter
-        value_label = QLabel("Value Range:")
-        filter_layout.addWidget(value_label, 4, 0)
-        value_layout = QHBoxLayout()
-        
-        self.value_min = QDoubleSpinBox()
-        self.value_min.setRange(-1000, 1000)
-        self.value_min.valueChanged.connect(lambda: self.onFilterChanged("value"))
-        
-        self.value_max = QDoubleSpinBox()
-        self.value_max.setRange(-1000, 1000)
-        self.value_max.setValue(1000)
-        self.value_max.valueChanged.connect(lambda: self.onFilterChanged("value"))
-        
-        value_layout.addWidget(self.value_min)
-        value_layout.addWidget(QLabel("to"))
-        value_layout.addWidget(self.value_max)
-        filter_layout.addLayout(value_layout, 4, 1)
-        
-        history_layout.addLayout(filter_layout)
-        
-        # History list widget with enhanced functionality
-        self.history_list = QListWidget()
-        self.history_list.setMaximumHeight(150)
-        self.history_list.setAlternatingRowColors(True)
-        self.history_list.itemDoubleClicked.connect(self.onHistoryItemDoubleClicked)
-        self.history_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.history_list.customContextMenuRequested.connect(self.showHistoryContextMenu)
-        self.history_list.setToolTip("Double-click to restore a transform state\nRight-click for more options")
-        history_layout.addWidget(self.history_list)
-        
-        # Undo/Redo buttons with tooltips
-        undo_redo_layout = QHBoxLayout()
-        
-        self.undo_button = QPushButton("Undo (Ctrl+Z)")
-        self.undo_button.setToolTip("Undo last transform")
-        self.undo_button.clicked.connect(self.undoTransform)
-        self.undo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.undo_button)
-        
-        self.redo_button = QPushButton("Redo (Ctrl+Y)")
-        self.redo_button.setToolTip("Redo last undone transform")
-        self.redo_button.clicked.connect(self.redoTransform)
-        self.redo_button.setEnabled(False)
-        undo_redo_layout.addWidget(self.redo_button)
-        
-        history_layout.addLayout(undo_redo_layout)
-        
-        # Presets controls with categories
-        presets_group = QGroupBox("Transform Presets")
-        presets_layout = QVBoxLayout()
-        
-        # Category and preset selection
-        selection_layout = QGridLayout()
-        
-        # Category filter
-        category_label = QLabel("Category:")
-        self.category_filter = QComboBox()
-        self.updateCategoryFilter()
-        self.category_filter.currentTextChanged.connect(self.onCategoryChanged)
-        selection_layout.addWidget(category_label, 0, 0)
-        selection_layout.addWidget(self.category_filter, 0, 1)
-        
-        # Preset selection
-        preset_label = QLabel("Preset:")
-        self.preset_combo = QComboBox()
-        self.updatePresetCombo()
-        self.preset_combo.setToolTip("Select a saved transform preset")
-        selection_layout.addWidget(preset_label, 1, 0)
-        selection_layout.addWidget(self.preset_combo, 1, 1)
-        
-        presets_layout.addLayout(selection_layout)
-        
-        # Preset actions
-        actions_layout = QHBoxLayout()
-        
-        load_preset_btn = QPushButton("Load (Ctrl+L)")
-        load_preset_btn.setToolTip("Load selected transform preset")
-        load_preset_btn.clicked.connect(self.loadSelectedPreset)
-        actions_layout.addWidget(load_preset_btn)
-        
-        save_preset_btn = QPushButton("Save (Ctrl+S)")
-        save_preset_btn.setToolTip("Save current transform as preset")
-        save_preset_btn.clicked.connect(self.saveCurrentAsPreset)
-        actions_layout.addWidget(save_preset_btn)
-        
-        manage_presets_btn = QPushButton("Manage...")
-        manage_presets_btn.setToolTip("Manage transform presets")
-        manage_presets_btn.clicked.connect(self.showPresetManager)
-        actions_layout.addWidget(manage_presets_btn)
-        
-        presets_layout.addLayout(actions_layout)
-        presets_group.setLayout(presets_layout)
-        layout.addWidget(presets_group)
-        
-        # Transform mode options
-        options_group = QGroupBox("Options")
-        options_layout = QVBoxLayout()
-        
-        # Relative/Absolute mode toggle
-        self.relative_mode = QCheckBox("Relative Mode (Alt+R)")
-        self.relative_mode.setToolTip("Toggle between relative and absolute transformations")
-        self.relative_mode.stateChanged.connect(self.onRelativeModeChanged)
-        options_layout.addWidget(self.relative_mode)
-        
-        options_group.setLayout(options_layout)
-        layout.addWidget(options_group)
-        
-        # Snapping controls with enhanced layout
-        snap_group = QGroupBox("Snapping")
-        snap_layout = QGridLayout()
-        
-        # Enable/disable snapping with shortcut
-        self.snap_enabled = QCheckBox("Enable Snapping (Ctrl+G)")
-        self.snap_enabled.setToolTip("Toggle grid snapping (Ctrl+G)")
-        self.snap_enabled.setChecked(True)
-        self.snap_enabled.stateChanged.connect(self.onSnapSettingsChanged)
-        snap_layout.addWidget(self.snap_enabled, 0, 0, 1, 2)
-        
-        # Snapping increments with labels and tooltips
-        snap_layout.addWidget(QLabel("Grid Size:"), 1, 0)
-        self.snap_translate = QDoubleSpinBox()
-        self.snap_translate.setRange(0.001, 100.0)
-        self.snap_translate.setValue(0.25)
-        self.snap_translate.setSingleStep(0.25)
-        self.snap_translate.setToolTip("Set grid size for translation snapping")
-        self.snap_translate.valueChanged.connect(self.onSnapSettingsChanged)
-        snap_layout.addWidget(self.snap_translate, 1, 1)
-        
-        snap_layout.addWidget(QLabel("Angle (degrees):"), 2, 0)
-        self.snap_rotate = QDoubleSpinBox()
-        self.snap_rotate.setRange(0.001, 90.0)
-        self.snap_rotate.setValue(15.0)
-        self.snap_rotate.setSingleStep(5.0)
-        self.snap_rotate.setToolTip("Set angle increment for rotation snapping")
-        self.snap_rotate.valueChanged.connect(self.onSnapSettingsChanged)
-        snap_layout.addWidget(self.snap_rotate, 2, 1)
-        
-        snap_layout.addWidget(QLabel("Scale Increment:"), 3, 0)
-        self.snap_scale = QDoubleSpinBox()
-        self.snap_scale.setRange(0.001, 10.0)
-        self.snap_scale.setValue(0.25)
-        self.snap_scale.setSingleStep(0.25)
-        self.snap_scale.setToolTip("Set scale increment for scaling snapping")
-        self.snap_scale.valueChanged.connect(self.onSnapSettingsChanged)
-        snap_layout.addWidget(self.snap_scale, 3, 1)
-        
-        snap_group.setLayout(snap_layout)
-        layout.addWidget(snap_group)
-        
-        # Apply button with tooltip
-        apply_button = QPushButton("Apply Transform (Enter)")
-        apply_button.setToolTip("Apply the current transformation (Enter)")
-        apply_button.clicked.connect(self.applyTransform)
-        layout.addWidget(apply_button)
-        
-        # Add stretch to push everything to the top
-        layout.addStretch()
+        # Set the main layout
+        self.setLayout(layout)
         
         # Select translate mode by default
         self.mode_group.buttons()[0].setChecked(True)
-        self.axis_group.buttons()[0].setChecked(True)
-        
-        # Emit initial settings
-        self.onSnapSettingsChanged()
-        
-        # Add visual feedback indicators
-        self.status_label = QLabel()
-        self.status_label.setStyleSheet("QLabel { color: #2196F3; }")
-        self.layout().addWidget(self.status_label)
-        
-        # Add performance monitor widget
-        self.performance_widget = QWidget()
-        self.performance_layout = QVBoxLayout(self.performance_widget)
-        self.performance_indicator = QProgressBar()
-        self.performance_layout.addWidget(self.performance_indicator)
-        self.layout().addWidget(self.performance_widget)
-        
-        # Connect signals
-        self.transform_preview.connect(self.update_preview_overlay)
-        self.performance_alert.connect(self.show_performance_warning)
-        
-    def setActiveAxis(self, axis):
-        """Set the active axis."""
-        for button in self.axis_group.buttons():
-            if button.text().split()[0].lower() == axis:
-                button.setChecked(True)
-                self.onAxisChanged(axis)
-                break
-                
-    def onAxisChanged(self, axis):
-        """Handle axis selection change."""
-        self._active_axis = axis
-        self.axis_changed.emit(axis)
-        
-    def toggleSnapping(self):
-        """Toggle snapping on/off."""
-        self.snap_enabled.setChecked(not self.snap_enabled.isChecked())
-        
-    def onRelativeModeChanged(self, state):
-        """Handle relative mode toggle with visual feedback."""
-        self._relative_mode = bool(state)
-        mode = "relative" if self._relative_mode else "absolute"
-        
-        # Update mode indicator
-        self._update_mode_indicator(self.current_transform_mode)
-        
-        # Emit mode change signal
-        self.transform_mode_changed.emit(f"{self.current_transform_mode}_{mode}")
-        
-        # Update transform state
-        self._update_transform_state()
-        
-    def getTransformMode(self):
-        """Get the current transform mode with relative/absolute state."""
-        if not self._current_mode:
-            return None
-        mode = "relative" if self._relative_mode else "absolute"
-        return f"{self._current_mode}_{mode}"
-        
-    def getSnapSettings(self):
-        """Get current snapping settings."""
-        return {
-            'enabled': self.snap_enabled.isChecked(),
-            'translate': self.snap_translate.value(),
-            'rotate': self.snap_rotate.value(),
-            'scale': self.snap_scale.value(),
-            'relative_mode': self._relative_mode
-        }
         
     def onModeChanged(self, mode):
-        """Handle transform mode change."""
-        self._current_mode = mode
-        self.transform_mode_changed.emit(mode)
+        """Handle mode change with visual feedback and animation."""
+        # Store the old mode
+        old_mode = self.current_transform_mode
+        self.current_transform_mode = mode
         
-    def onSnapSettingsChanged(self):
-        """Emit signal when snapping settings change."""
-        settings = self.getSnapSettings()
-        self.snap_settings_changed.emit(settings)
+        # Create fade-out animation for the mode group
+        fade_out = QPropertyAnimation(self.mode_group, b"windowOpacity")
+        fade_out.setDuration(150)  # Short duration for subtle effect
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
         
-    def setCurrentMode(self, mode):
-        """Set the current transform mode."""
-        for button in self.mode_group.buttons():
-            if button.text().split()[0].lower() == mode:
-                button.setChecked(True)
-                self.onModeChanged(mode)
-                break
+        # Create fade-in animation
+        fade_in = QPropertyAnimation(self.mode_group, b"windowOpacity")
+        fade_in.setDuration(150)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
         
-    def setupTranslateParams(self):
-        self.clearParams()
-        self.addParameter("Distance", 0.0, -1000.0, 1000.0, 0.1)
+        # Sequential animation group
+        transition = QSequentialAnimationGroup()
+        transition.addAnimation(fade_out)
+        transition.addAnimation(fade_in)
         
-    def setupRotateParams(self):
-        self.clearParams()
-        self.addParameter("Angle (degrees)", 0.0, -360.0, 360.0, 1.0)
+        # Update UI elements between animations
+        def update_ui():
+            # Update radio button styles with smooth color transition
+            for button in self.mode_group.buttons():
+                if button.isChecked():
+                    button.setStyleSheet("""
+                        QRadioButton {
+                            padding: 8px;
+                            border-radius: 4px;
+                            margin: 2px;
+                            background-color: #E3F2FD;
+                            border: 1px solid #2196F3;
+                        }
+                        QRadioButton:hover {
+                            background-color: #BBDEFB;
+                        }
+                    """)
+                else:
+                    button.setStyleSheet("""
+                        QRadioButton {
+                            padding: 8px;
+                            border-radius: 4px;
+                            margin: 2px;
+                        }
+                        QRadioButton:hover {
+                            background-color: rgba(33, 150, 243, 0.1);
+                        }
+                    """)
+            
+            # Update status label with mode-specific color
+            mode_colors = {
+                'translate': '#2196F3',  # Blue
+                'rotate': '#4CAF50',     # Green
+                'scale': '#FF9800'       # Orange
+            }
+            color = mode_colors.get(mode, '#2196F3')
+            self.status_label.setText(f"Active Mode: {mode.capitalize()}")
+            self.status_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {color};
+                    padding: 4px;
+                    font-size: 10pt;
+                    font-weight: bold;
+                }}
+            """)
+            
+            # Update mode indicator
+            self._update_mode_indicator(mode)
+            
+            # Emit mode change signal
+            self.mode_changed.emit(mode)
+            
+            # Update preview if needed
+            if self._preview_active:
+                self.updatePreview()
         
-    def setupScaleParams(self):
-        self.clearParams()
-        self.addParameter("Scale Factor", 1.0, 0.01, 100.0, 0.1)
+        # Connect the update function to the fade-out animation's finished signal
+        fade_out.finished.connect(update_ui)
         
-    def clearParams(self):
-        while self.params_layout.count():
-            child = self.params_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-                
-    def addParameter(self, name, default_value, min_val, max_val, step):
-        spin_box = QDoubleSpinBox()
-        spin_box.setRange(min_val, max_val)
-        spin_box.setValue(default_value)
-        spin_box.setSingleStep(step)
-        self.params_layout.addRow(name, spin_box)
+        # Start animation
+        transition.start(QAbstractAnimation.DeleteWhenStopped)
         
+        # Log the mode change
+        self.logger.info(f"Transform mode changed: {old_mode} -> {mode}")
+
     def applyTransform(self):
         # Collect parameters
         params = {}
@@ -1412,4 +1273,364 @@ class TransformTab(QWidget):
             component="TransformTab",
             change_type="error",
             details={'message': message}
-        ) 
+        )
+
+    def quickTransform(self, transform_type):
+        """Apply quick transformation presets with visual feedback."""
+        if not self._preview_active:
+            return
+            
+        # Store current state for preview
+        self.preview_points = self.points.copy()
+        
+        # Apply transform with visual feedback
+        if transform_type == "flip_h":
+            self.scale_x_spin.setValue(-self.scale_x_spin.value())
+            self.show_transform_feedback("Flipped horizontally")
+        elif transform_type == "flip_v":
+            self.scale_y_spin.setValue(-self.scale_y_spin.value())
+            self.show_transform_feedback("Flipped vertically")
+        elif transform_type == "rotate_90_cw":
+            current_angle = self.rotation_spin.value()
+            self.rotation_spin.setValue((current_angle + 90) % 360)
+            self.show_transform_feedback("Rotated 90° clockwise")
+        elif transform_type == "rotate_90_ccw":
+            current_angle = self.rotation_spin.value()
+            self.rotation_spin.setValue((current_angle - 90) % 360)
+            self.show_transform_feedback("Rotated 90° counter-clockwise")
+            
+        # Update preview
+        self.updatePreview()
+        
+        # Clear preview after a short delay
+        QTimer.singleShot(1000, self.clearPreview)
+        
+    def show_transform_feedback(self, message):
+        """Show visual feedback for transform operations."""
+        # Update status label with transform message
+        self.status_label.setText(message)
+        self.status_label.setStyleSheet("QLabel { color: #2196F3; font-weight: bold; }")
+        
+        # Reset style after delay
+        QTimer.singleShot(1000, lambda: self.status_label.setStyleSheet("QLabel { color: #2196F3; }"))
+        
+        # Log the transform operation
+        self.logger.info(f"Quick transform: {message}")
+        
+    def setupShortcuts(self):
+        """Set up keyboard shortcuts for quick transforms."""
+        # Flip horizontal
+        self.flip_h_shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
+        self.flip_h_shortcut.activated.connect(lambda: self.quickTransform("flip_h"))
+        
+        # Flip vertical
+        self.flip_v_shortcut = QShortcut(QKeySequence("Ctrl+J"), self)
+        self.flip_v_shortcut.activated.connect(lambda: self.quickTransform("flip_v"))
+        
+        # Rotate 90° clockwise
+        self.rotate_cw_shortcut = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
+        self.rotate_cw_shortcut.activated.connect(lambda: self.quickTransform("rotate_90_cw"))
+        
+        # Rotate 90° counter-clockwise
+        self.rotate_ccw_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        self.rotate_ccw_shortcut.activated.connect(lambda: self.quickTransform("rotate_90_ccw"))
+        
+        # Reset transform
+        self.reset_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.reset_shortcut.activated.connect(self.reset_transform_values)
+        
+    def updatePreview(self):
+        """Update the preview display with visual guides."""
+        if not self._preview_active:
+            return
+            
+        # Clear existing preview
+        self.clearPreview()
+        
+        # Draw the transformed shape
+        preview_path = QPainterPath()
+        preview_path.moveTo(self.preview_points[0][0], self.preview_points[0][1])
+        for point in self.preview_points[1:]:
+            preview_path.lineTo(point[0], point[1])
+        if len(self.preview_points) >= 3:
+            preview_path.lineTo(self.preview_points[0][0], self.preview_points[0][1])
+            
+        # Set preview style based on mode
+        mode_colors = {
+            'translate': '#2196F3',  # Blue
+            'rotate': '#4CAF50',     # Green
+            'scale': '#FF9800'       # Orange
+        }
+        color = mode_colors.get(self.current_transform_mode, '#2196F3')
+        
+        # Draw preview with mode-specific style
+        preview_pen = QPen(QColor(color), 1, Qt.PenStyle.DashLine)
+        self.scene.addPath(preview_path, preview_pen)
+        
+        # Add visual guides based on transform mode
+        if self.current_transform_mode == 'translate':
+            self._draw_translation_guides()
+        elif self.current_transform_mode == 'rotate':
+            self._draw_rotation_guides()
+        elif self.current_transform_mode == 'scale':
+            self._draw_scale_guides()
+            
+        # Update the scene
+        self.scene.update()
+        
+    def _draw_translation_guides(self):
+        """Draw visual guides for translation."""
+        # Calculate center point
+        center_x = sum(p[0] for p in self.preview_points) / len(self.preview_points)
+        center_y = sum(p[1] for p in self.preview_points) / len(self.preview_points)
+        
+        # Draw translation arrows
+        arrow_size = 20
+        arrow_pen = QPen(QColor('#2196F3'), 1, Qt.PenStyle.SolidLine)
+        
+        # X-axis arrow
+        x_arrow = QPainterPath()
+        x_arrow.moveTo(center_x, center_y)
+        x_arrow.lineTo(center_x + arrow_size, center_y)
+        x_arrow.lineTo(center_x + arrow_size - 5, center_y - 5)
+        x_arrow.moveTo(center_x + arrow_size, center_y)
+        x_arrow.lineTo(center_x + arrow_size - 5, center_y + 5)
+        self.scene.addPath(x_arrow, arrow_pen)
+        
+        # Y-axis arrow
+        y_arrow = QPainterPath()
+        y_arrow.moveTo(center_x, center_y)
+        y_arrow.lineTo(center_x, center_y + arrow_size)
+        y_arrow.lineTo(center_x - 5, center_y + arrow_size - 5)
+        y_arrow.moveTo(center_x, center_y + arrow_size)
+        y_arrow.lineTo(center_x + 5, center_y + arrow_size - 5)
+        self.scene.addPath(y_arrow, arrow_pen)
+        
+        # Add tooltips
+        for item in self.scene.items():
+            if isinstance(item, QGraphicsPathItem):
+                item.setToolTip(f"Translation Guide\nX: {self.translate_x.value():.2f}\nY: {self.translate_y.value():.2f}")
+                
+    def _draw_rotation_guides(self):
+        """Draw visual guides for rotation with draggable handle."""
+        # Calculate center point
+        center_x = sum(p[0] for p in self.preview_points) / len(self.preview_points)
+        center_y = sum(p[1] for p in self.preview_points) / len(self.preview_points)
+        self._rotation_center = QPointF(center_x, center_y)
+        
+        # Draw rotation arc
+        radius = 30
+        angle = self.rotation_spin.value()
+        arc_rect = QRectF(center_x - radius, center_y - radius, radius * 2, radius * 2)
+        arc_pen = QPen(QColor('#4CAF50'), 1, Qt.PenStyle.DashLine)
+        arc_item = self.scene.addEllipse(arc_rect, arc_pen)
+        arc_item.setStartAngle(0)
+        arc_item.setSpanAngle(angle * 16)  # Convert degrees to 1/16th of a degree for Qt
+        
+        # Draw rotation handle
+        handle_pen = QPen(QColor('#4CAF50'), 1, Qt.PenStyle.SolidLine)
+        handle_path = QPainterPath()
+        handle_path.moveTo(center_x, center_y)
+        handle_x = center_x + radius * np.cos(np.radians(angle))
+        handle_y = center_y + radius * np.sin(np.radians(angle))
+        handle_path.lineTo(handle_x, handle_y)
+        
+        # Create draggable handle
+        self._rotation_handle = self.scene.addPath(handle_path, handle_pen)
+        self._rotation_handle.setFlag(QGraphicsItem.ItemIsMovable, False)  # We handle movement manually
+        self._rotation_handle.setToolTip(f"Rotation Guide\nAngle: {angle:.1f}°\nDrag to rotate")
+        self._rotation_handle.setData(0, "rotation_handle")  # Tag for identification
+        
+        # Add angle label
+        label_x = handle_x + 10
+        label_y = handle_y + 10
+        angle_label = self.scene.addText(f"{angle:.1f}°")
+        angle_label.setPos(label_x, label_y)
+        angle_label.setDefaultTextColor(QColor('#4CAF50'))
+        
+    def _draw_scale_guides(self):
+        """Draw visual guides for scaling with draggable handles."""
+        # Calculate bounding box
+        min_x = min(p[0] for p in self.preview_points)
+        max_x = max(p[0] for p in self.preview_points)
+        min_y = min(p[1] for p in self.preview_points)
+        max_y = max(p[1] for p in self.preview_points)
+        
+        # Draw scaling grid
+        grid_pen = QPen(QColor('#FF9800'), 1, Qt.PenStyle.DashLine)
+        
+        # Draw grid lines
+        for i in range(4):
+            # Vertical lines
+            x = min_x + (max_x - min_x) * (i + 1) / 4
+            self.scene.addLine(x, min_y, x, max_y, grid_pen)
+            
+            # Horizontal lines
+            y = min_y + (max_y - min_y) * (i + 1) / 4
+            self.scene.addLine(min_x, y, max_x, y, grid_pen)
+            
+        # Clear existing scale handles
+        for handle in self._scale_handles:
+            self.scene.removeItem(handle)
+        self._scale_handles.clear()
+        
+        # Draw scale handles
+        handle_pen = QPen(QColor('#FF9800'), 1, Qt.PenStyle.SolidLine)
+        handle_size = self.HANDLE_SIZE
+        
+        # Corner handles with labels
+        corners = [
+            (min_x, min_y, "top_left", "↖"),
+            (max_x, min_y, "top_right", "↗"),
+            (max_x, max_y, "bottom_right", "↘"),
+            (min_x, max_y, "bottom_left", "↙")
+        ]
+        
+        for x, y, handle_id, arrow in corners:
+            # Draw handle
+            handle = QRectF(x - handle_size/2, y - handle_size/2, handle_size, handle_size)
+            handle_item = self.scene.addRect(handle, handle_pen)
+            handle_item.setToolTip(f"Scale Guide\nX: {self.scale_x.value():.2f}\nY: {self.scale_y.value():.2f}\nDrag to scale")
+            handle_item.setData(0, handle_id)
+            self._scale_handles.append(handle_item)
+            
+            # Draw direction arrow
+            arrow_item = self.scene.addText(arrow)
+            arrow_item.setPos(x + handle_size/2, y + handle_size/2)
+            arrow_item.setDefaultTextColor(QColor('#FF9800'))
+            
+        # Add scale labels
+        scale_text = f"Scale: {self.scale_x.value():.2f} × {self.scale_y.value():.2f}"
+        label = self.scene.addText(scale_text)
+        label.setPos(min_x, min_y - 20)
+        label.setDefaultTextColor(QColor('#FF9800'))
+        
+    def clearPreview(self):
+        """Clear the preview display and guides."""
+        # Remove all preview items
+        for item in self.scene.items():
+            if isinstance(item, (QGraphicsPathItem, QGraphicsEllipseItem, 
+                               QGraphicsLineItem, QGraphicsRectItem,
+                               QGraphicsTextItem)):
+                self.scene.removeItem(item)
+                
+        # Reset handle references
+        self._rotation_handle = None
+        self._scale_handles.clear()
+        self._rotation_center = None
+        
+        # Update the scene
+        self.scene.update()
+
+    def mousePressEvent(self, event):
+        """Handle mouse press events for draggable handles."""
+        if not self._preview_active:
+            return
+            
+        if self.current_transform_mode == 'rotate' and self._rotation_handle:
+            if self._rotation_handle.contains(event.pos()):
+                self._dragging = True
+                self._drag_handle = self._rotation_handle
+                self._drag_start = event.pos()
+                self._highlight_handle(self._rotation_handle)
+                event.accept()
+                return
+                
+        elif self.current_transform_mode == 'scale':
+            for handle in self._scale_handles:
+                if handle.contains(event.pos()):
+                    self._dragging = True
+                    self._drag_handle = handle
+                    self._drag_start = event.pos()
+                    self._highlight_handle(handle)
+                    event.accept()
+                    return
+                    
+        super().mousePressEvent(event)
+        
+    def mouseMoveEvent(self, event):
+        """Handle mouse move events for draggable handles."""
+        if not self._dragging or not self._drag_handle:
+            super().mouseMoveEvent(event)
+            return
+            
+        if self.current_transform_mode == 'rotate':
+            self._handle_rotation_drag(event)
+        elif self.current_transform_mode == 'scale':
+            self._handle_scale_drag(event)
+            
+        event.accept()
+        
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release events for draggable handles."""
+        if self._dragging:
+            self._dragging = False
+            if self._drag_handle:
+                self._unhighlight_handle(self._drag_handle)
+            self._drag_handle = None
+            self._drag_start = None
+            event.accept()
+            return
+            
+        super().mouseReleaseEvent(event)
+        
+    def _handle_rotation_drag(self, event):
+        """Handle rotation handle dragging."""
+        if not self._rotation_center:
+            return
+            
+        # Calculate angle from center to mouse position
+        delta = event.pos() - self._rotation_center
+        angle = np.degrees(np.arctan2(delta.y(), delta.x()))
+        if angle < 0:
+            angle += 360  # Normalize to 0-360 degrees
+            
+        # Update rotation value
+        self.rotation_spin.setValue(angle)
+        self.updatePreview()
+        
+    def _handle_scale_drag(self, event):
+        """Handle scale handle dragging."""
+        if not self._drag_start:
+            return
+            
+        delta = event.pos() - self._drag_start
+        handle_id = self._drag_handle.data(0)
+        
+        # Get current scale values
+        current_x = self.scale_x.value()
+        current_y = self.scale_y.value()
+        
+        # Calculate new scale values based on handle position
+        if "left" in handle_id:
+            new_x = current_x - delta.x() * self.SCALE_SENSITIVITY
+        elif "right" in handle_id:
+            new_x = current_x + delta.x() * self.SCALE_SENSITIVITY
+        else:
+            new_x = current_x
+            
+        if "top" in handle_id:
+            new_y = current_y - delta.y() * self.SCALE_SENSITIVITY
+        elif "bottom" in handle_id:
+            new_y = current_y + delta.y() * self.SCALE_SENSITIVITY
+        else:
+            new_y = current_y
+            
+        # Update scale values with minimum limit
+        self.scale_x.setValue(max(0.1, new_x))
+        self.scale_y.setValue(max(0.1, new_y))
+        self.updatePreview()
+        
+    def _highlight_handle(self, handle):
+        """Highlight a handle during dragging."""
+        if isinstance(handle, QGraphicsPathItem):
+            handle.setPen(QPen(QColor('#4CAF50'), 2, Qt.PenStyle.SolidLine))
+        elif isinstance(handle, QGraphicsRectItem):
+            handle.setPen(QPen(QColor('#FF9800'), 2, Qt.PenStyle.SolidLine))
+            
+    def _unhighlight_handle(self, handle):
+        """Remove highlight from a handle."""
+        if isinstance(handle, QGraphicsPathItem):
+            handle.setPen(QPen(QColor('#4CAF50'), 1, Qt.PenStyle.SolidLine))
+        elif isinstance(handle, QGraphicsRectItem):
+            handle.setPen(QPen(QColor('#FF9800'), 1, Qt.PenStyle.SolidLine)) 
