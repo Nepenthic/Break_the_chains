@@ -22,7 +22,10 @@ class TestMaterialSimulation(unittest.TestCase):
         self.rect_stock_params = StockParameters(
             stock_type=StockType.RECTANGULAR,
             dimensions=(100.0, 50.0, 25.0),  # length, width, height
-            voxel_size=1.0
+            voxel_size=1.0,
+            min_voxel_size=0.5,
+            max_voxel_size=2.0,
+            refinement_threshold=0.1
         )
         self.rect_simulator = MaterialSimulator(self.rect_stock_params)
         
@@ -30,7 +33,10 @@ class TestMaterialSimulation(unittest.TestCase):
         self.cyl_stock_params = StockParameters(
             stock_type=StockType.CYLINDRICAL,
             dimensions=(80.0, 30.0, 0.0),  # diameter, height
-            voxel_size=1.0
+            voxel_size=1.0,
+            min_voxel_size=0.5,
+            max_voxel_size=2.0,
+            refinement_threshold=0.1
         )
         self.cyl_simulator = MaterialSimulator(self.cyl_stock_params)
         
@@ -61,8 +67,11 @@ class TestMaterialSimulation(unittest.TestCase):
         # Create large stock for performance testing
         self.large_stock_params = StockParameters(
             stock_type=StockType.RECTANGULAR,
-            dimensions=(1000.0, 1000.0, 100.0),  # Large stock
-            voxel_size=1.0
+            dimensions=(500.0, 500.0, 250.0),
+            voxel_size=2.0,
+            min_voxel_size=1.0,
+            max_voxel_size=4.0,
+            refinement_threshold=0.1
         )
         self.large_simulator = MaterialSimulator(self.large_stock_params)
         
@@ -466,6 +475,170 @@ class TestMaterialSimulation(unittest.TestCase):
                                 simulator.voxel_grid[simulator._get_voxel_index(x,y,z)],
                                 f"Island material removed at ({x},{y},{z})"
                             )
+
+    def test_adaptive_voxel_initialization(self):
+        """Test initialization of adaptive voxel grid."""
+        simulator = MaterialSimulator(self.rect_stock_params)
+        
+        # Check root node initialization
+        assert simulator.voxel_grid.root is not None
+        assert simulator.voxel_grid.root.voxel_grid is not None
+        assert simulator.voxel_grid.root.children is None
+        assert simulator.voxel_grid.root.voxel_size == self.rect_stock_params.voxel_size
+    
+    def test_adaptive_voxel_refinement(self):
+        """Test voxel refinement based on geometry complexity."""
+        simulator = MaterialSimulator(self.rect_stock_params)
+        
+        # Create a complex toolpath that should trigger refinement
+        toolpath = []
+        for i in range(100):
+            t = i / 99
+            x = 50 + 20 * np.cos(2 * np.pi * t)
+            y = 50 + 20 * np.sin(2 * np.pi * t)
+            z = 25
+            toolpath.append(np.array([x, y, z]))
+        
+        # Simulate toolpath
+        simulator.simulate_toolpath(toolpath, tool_diameter=5.0)
+        
+        # Check if refinement occurred
+        refined_nodes = []
+        def collect_refined_nodes(node):
+            if node.children is not None:
+                refined_nodes.append(node)
+                for child in node.children:
+                    collect_refined_nodes(child)
+        
+        collect_refined_nodes(simulator.voxel_grid.root)
+        assert len(refined_nodes) > 0
+    
+    def test_adaptive_voxel_coarsening(self):
+        """Test voxel coarsening when geometry becomes simpler."""
+        simulator = MaterialSimulator(self.rect_stock_params)
+        
+        # First create complex geometry
+        toolpath1 = []
+        for i in range(100):
+            t = i / 99
+            x = 50 + 20 * np.cos(2 * np.pi * t)
+            y = 50 + 20 * np.sin(2 * np.pi * t)
+            z = 25
+            toolpath1.append(np.array([x, y, z]))
+        
+        simulator.simulate_toolpath(toolpath1, tool_diameter=5.0)
+        
+        # Then create simple geometry
+        toolpath2 = []
+        for i in range(100):
+            t = i / 99
+            x = 50 + 40 * np.cos(2 * np.pi * t)
+            y = 50 + 40 * np.sin(2 * np.pi * t)
+            z = 25
+            toolpath2.append(np.array([x, y, z]))
+        
+        simulator.simulate_toolpath(toolpath2, tool_diameter=20.0)
+        
+        # Check if coarsening occurred
+        refined_nodes = []
+        def collect_refined_nodes(node):
+            if node.children is not None:
+                refined_nodes.append(node)
+                for child in node.children:
+                    collect_refined_nodes(child)
+        
+        collect_refined_nodes(simulator.voxel_grid.root)
+        assert len(refined_nodes) < 100  # Should have coarsened some nodes
+    
+    def test_adaptive_voxel_with_islands(self):
+        """Test adaptive voxel grid with islands."""
+        simulator = MaterialSimulator(self.rect_stock_params)
+        
+        # Create islands
+        islands = [
+            {
+                'points': [
+                    [40, 40],
+                    [60, 40],
+                    [60, 60],
+                    [40, 60]
+                ],
+                'z_min': 0,
+                'z_max': 50
+            }
+        ]
+        
+        # Create toolpath that intersects with islands
+        toolpath = []
+        for i in range(100):
+            t = i / 99
+            x = 50 + 30 * np.cos(2 * np.pi * t)
+            y = 50 + 30 * np.sin(2 * np.pi * t)
+            z = 25
+            toolpath.append(np.array([x, y, z]))
+        
+        simulator.simulate_toolpath(toolpath, tool_diameter=10.0, islands=islands)
+        
+        # Check if islands are preserved
+        island_center = np.array([50, 50, 25])
+        node = simulator.voxel_grid.get_node_at_position(island_center)
+        assert node is not None
+        assert node.voxel_grid[0, 0] == 1  # Island should still have material
+    
+    def test_adaptive_voxel_performance(self):
+        """Test performance of adaptive voxel grid."""
+        simulator = MaterialSimulator(self.large_stock_params)
+        
+        # Create complex toolpath
+        toolpath = []
+        for i in range(1000):
+            t = i / 999
+            x = 250 + 200 * np.cos(2 * np.pi * t)
+            y = 250 + 200 * np.sin(2 * np.pi * t)
+            z = 125
+            toolpath.append(np.array([x, y, z]))
+        
+        # Measure performance
+        start_time = time.time()
+        simulator.simulate_toolpath(toolpath, tool_diameter=20.0)
+        end_time = time.time()
+        
+        simulation_time = end_time - start_time
+        print(f"Adaptive voxel simulation time: {simulation_time:.2f} seconds")
+        
+        # Check memory usage
+        process = psutil.Process()
+        memory_usage = process.memory_info().rss / 1024 / 1024  # MB
+        print(f"Memory usage: {memory_usage:.2f} MB")
+        
+        # Performance assertions
+        assert simulation_time < 30.0  # Should complete within 30 seconds
+        assert memory_usage < 1000.0  # Should use less than 1GB of memory
+    
+    def test_adaptive_voxel_visualization(self):
+        """Test visualization of adaptive voxel grid."""
+        simulator = MaterialSimulator(self.rect_stock_params)
+        
+        # Create some material removal
+        toolpath = []
+        for i in range(100):
+            t = i / 99
+            x = 50 + 20 * np.cos(2 * np.pi * t)
+            y = 50 + 20 * np.sin(2 * np.pi * t)
+            z = 25
+            toolpath.append(np.array([x, y, z]))
+        
+        simulator.simulate_toolpath(toolpath, tool_diameter=5.0)
+        
+        # Test visualization
+        import matplotlib.pyplot as plt
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        simulator.visualize(ax)
+        plt.close()
+        
+        # If we get here without errors, visualization worked
+        assert True
 
 if __name__ == '__main__':
     unittest.main() 

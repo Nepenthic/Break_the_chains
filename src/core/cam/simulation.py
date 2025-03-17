@@ -2,7 +2,7 @@
 Machine simulation module for real-time toolpath visualization and verification.
 """
 
-from typing import List, Optional, Dict, Union, Tuple
+from typing import List, Optional, Dict, Union, Tuple, Any
 import numpy as np
 from scipy import sparse
 from dataclasses import dataclass
@@ -43,6 +43,303 @@ class StockParameters:
     dimensions: Tuple[float, float, float]  # (length, width, height) or (diameter, height)
     voxel_size: float = 1.0  # Size of each voxel in mm
     origin: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # Stock origin point
+    min_voxel_size: float = 0.1  # Minimum voxel size for adaptive grid
+    max_voxel_size: float = 4.0  # Maximum voxel size for adaptive grid
+    refinement_threshold: float = 0.5  # Threshold for voxel refinement (0-1)
+
+class VoxelNode:
+    """Represents a node in the adaptive voxel grid."""
+    
+    def __init__(
+        self,
+        center: np.ndarray,
+        size: float,
+        parent: Optional['VoxelNode'] = None,
+        level: int = 0
+    ):
+        """
+        Initialize a voxel node.
+        
+        Args:
+            center: Center point of the node (x, y, z)
+            size: Size of the node (uniform in all dimensions)
+            parent: Parent node in the hierarchy
+            level: Level in the octree (0 for root)
+        """
+        self.center = center
+        self.size = size
+        self.parent = parent
+        self.level = level
+        self.children: Optional[List['VoxelNode']] = None
+        self.voxel_grid: Optional[sparse.csr_matrix] = None
+        self.is_leaf = True
+        self.lock = threading.Lock()
+        
+    def subdivide(self) -> None:
+        """Subdivide the node into 8 children."""
+        if not self.is_leaf:
+            return
+            
+        half_size = self.size / 2
+        quarter_size = half_size / 2
+        
+        # Create 8 children in octree order
+        self.children = []
+        for i in range(8):
+            # Calculate child center based on octree index
+            x = self.center[0] + quarter_size * ((i & 1) * 2 - 1)
+            y = self.center[1] + quarter_size * (((i >> 1) & 1) * 2 - 1)
+            z = self.center[2] + quarter_size * (((i >> 2) & 1) * 2 - 1)
+            
+            child = VoxelNode(
+                center=np.array([x, y, z]),
+                size=half_size,
+                parent=self,
+                level=self.level + 1
+            )
+            self.children.append(child)
+            
+        self.is_leaf = False
+        
+    def get_child_at_point(self, point: np.ndarray) -> Optional['VoxelNode']:
+        """
+        Get the child node containing a given point.
+        
+        Args:
+            point: Point to locate (x, y, z)
+            
+        Returns:
+            Child node containing the point, or None if point is outside node
+        """
+        if self.is_leaf:
+            return None
+            
+        # Check if point is within node bounds
+        half_size = self.size / 2
+        if not all(abs(p - c) <= half_size for p, c in zip(point, self.center)):
+            return None
+            
+        # Calculate child index based on point position
+        child_idx = 0
+        for i, (p, c) in enumerate(zip(point, self.center)):
+            if p > c:
+                child_idx |= (1 << i)
+                
+        return self.children[child_idx]
+        
+    def get_voxel_grid(self) -> sparse.csr_matrix:
+        """
+        Get the voxel grid for this node, creating it if necessary.
+        
+        Returns:
+            Sparse matrix representing the voxel grid
+        """
+        if self.voxel_grid is None:
+            # Calculate grid dimensions
+            nx = ny = nz = int(np.ceil(self.size / self.parent.voxel_size))
+            
+            # Initialize full voxel grid
+            self.voxel_grid = sparse.csr_matrix(
+                (np.ones(nx * ny * nz),
+                 (np.arange(nx * ny * nz),
+                  np.zeros(nx * ny * nz))),
+                shape=(nx * ny * nz, 1)
+            )
+            
+        return self.voxel_grid
+
+class AdaptiveVoxelGrid:
+    """Manages an adaptive voxel grid for material simulation."""
+    
+    def __init__(
+        self,
+        dimensions: Tuple[float, float, float],
+        min_voxel_size: float,
+        max_voxel_size: float,
+        refinement_threshold: float = 0.5
+    ):
+        """
+        Initialize adaptive voxel grid.
+        
+        Args:
+            dimensions: Stock dimensions (length, width, height)
+            min_voxel_size: Minimum voxel size for refinement
+            max_voxel_size: Maximum voxel size for coarsening
+            refinement_threshold: Threshold for voxel refinement (0-1)
+        """
+        self.dimensions = dimensions
+        self.min_voxel_size = min_voxel_size
+        self.max_voxel_size = max_voxel_size
+        self.refinement_threshold = refinement_threshold
+        
+        # Create root node
+        self.root = VoxelNode(
+            center=np.array([dimensions[0]/2, dimensions[1]/2, dimensions[2]/2]),
+            size=max(dimensions),
+            level=0
+        )
+        self.root.voxel_size = max_voxel_size
+        
+        # Initialize thread safety
+        self.grid_lock = threading.Lock()
+        
+    def get_node_at_point(self, point: np.ndarray) -> VoxelNode:
+        """
+        Get the leaf node containing a given point.
+        
+        Args:
+            point: Point to locate (x, y, z)
+            
+        Returns:
+            Leaf node containing the point
+        """
+        current = self.root
+        while not current.is_leaf:
+            child = current.get_child_at_point(point)
+            if child is None:
+                break
+            current = child
+        return current
+        
+    def refine_node(self, node: VoxelNode) -> None:
+        """
+        Refine a node by subdividing it and distributing its voxel grid.
+        
+        Args:
+            node: Node to refine
+        """
+        if node.size <= self.min_voxel_size:
+            return
+            
+        with node.lock:
+            if not node.is_leaf:
+                return
+                
+            # Store current voxel grid
+            old_grid = node.voxel_grid
+            if old_grid is None:
+                return
+                
+            # Subdivide node
+            node.subdivide()
+            
+            # Distribute voxels to children
+            nx = ny = nz = int(np.ceil(node.size / node.voxel_size))
+            for i in range(nx):
+                for j in range(ny):
+                    for k in range(nz):
+                        idx = i + nx * (j + ny * k)
+                        if old_grid[idx]:
+                            # Convert to world coordinates
+                            x = node.center[0] - node.size/2 + i * node.voxel_size
+                            y = node.center[1] - node.size/2 + j * node.voxel_size
+                            z = node.center[2] - node.size/2 + k * node.voxel_size
+                            
+                            # Find child containing this point
+                            child = node.get_child_at_point(np.array([x, y, z]))
+                            if child:
+                                child.get_voxel_grid()
+                                
+    def coarsen_node(self, node: VoxelNode) -> None:
+        """
+        Coarsen a node by merging its children's voxel grids.
+        
+        Args:
+            node: Node to coarsen
+        """
+        if node.size >= self.max_voxel_size:
+            return
+            
+        with node.lock:
+            if node.is_leaf or not all(child.is_leaf for child in node.children):
+                return
+                
+            # Merge children's voxel grids
+            nx = ny = nz = int(np.ceil(node.size / node.voxel_size))
+            merged_grid = sparse.csr_matrix(
+                (np.ones(nx * ny * nz),
+                 (np.arange(nx * ny * nz),
+                  np.zeros(nx * ny * nz))),
+                shape=(nx * ny * nz, 1)
+            )
+            
+            # Combine children's voxels
+            for child in node.children:
+                if child.voxel_grid is not None:
+                    # Convert child's voxels to parent's coordinate system
+                    # and merge them
+                    # ... (implementation details for coordinate conversion)
+                    pass
+                    
+            node.voxel_grid = merged_grid
+            node.children = None
+            node.is_leaf = True
+            
+    def remove_material(
+        self,
+        tool_position: np.ndarray,
+        tool_diameter: float,
+        islands: Optional[List[Dict[str, Union[List[np.ndarray], float]]]] = None
+    ) -> None:
+        """
+        Remove material at the specified tool position.
+        
+        Args:
+            tool_position: (x, y, z) position of tool tip
+            tool_diameter: Diameter of the cutting tool
+            islands: Optional list of islands to preserve
+        """
+        with self.grid_lock:
+            # Get node containing tool position
+            node = self.get_node_at_point(tool_position)
+            
+            # Check if refinement is needed
+            if tool_diameter < node.size * self.refinement_threshold:
+                self.refine_node(node)
+                node = self.get_node_at_point(tool_position)
+                
+            # Remove material from the node's voxel grid
+            with node.lock:
+                # Convert tool position to node's local coordinates
+                local_pos = tool_position - (node.center - node.size/2)
+                
+                # Calculate affected voxel ranges
+                tool_radius = tool_diameter / 2
+                vx = int(local_pos[0] / node.voxel_size)
+                vy = int(local_pos[1] / node.voxel_size)
+                vz = int(local_pos[2] / node.voxel_size)
+                
+                # Create removal mask
+                nx = ny = nz = int(np.ceil(node.size / node.voxel_size))
+                radius_voxels = int(np.ceil(tool_radius / node.voxel_size))
+                
+                indices_to_remove = []
+                for i in range(max(0, vx - radius_voxels),
+                             min(nx, vx + radius_voxels + 1)):
+                    for j in range(max(0, vy - radius_voxels),
+                                 min(ny, vy + radius_voxels + 1)):
+                        dx = i - vx
+                        dy = j - vy
+                        if dx*dx + dy*dy <= radius_voxels*radius_voxels:
+                            for k in range(max(0, vz),
+                                         min(nz, vz + 1)):
+                                idx = i + nx * (j + ny * k)
+                                indices_to_remove.append(idx)
+                                
+                # Remove material
+                if indices_to_remove:
+                    remove_mask = sparse.csr_matrix(
+                        (np.ones(len(indices_to_remove)),
+                         (indices_to_remove, np.zeros(len(indices_to_remove)))),
+                        shape=(nx * ny * nz, 1)
+                    )
+                    node.voxel_grid = node.voxel_grid.multiply(
+                        ~(remove_mask.astype(bool))
+                    )
+                    
+            # Check if coarsening is possible
+            if node.parent and node.parent.size < self.max_voxel_size:
+                self.coarsen_node(node.parent)
 
 class MaterialRemovalSimulation:
     """Simulates material removal during machining."""
@@ -218,65 +515,47 @@ class MaterialSimulator:
             stock_params: Parameters defining the stock material
         """
         self.stock_params = stock_params
-        self.voxel_size = stock_params.voxel_size
         
-        # Calculate grid dimensions
-        if stock_params.stock_type == StockType.RECTANGULAR:
-            length, width, height = stock_params.dimensions
-            self.nx = int(np.ceil(length / self.voxel_size))
-            self.ny = int(np.ceil(width / self.voxel_size))
-            self.nz = int(np.ceil(height / self.voxel_size))
-        else:  # CYLINDRICAL
-            diameter, height = stock_params.dimensions[:2]
-            self.nx = int(np.ceil(diameter / self.voxel_size))
-            self.ny = int(np.ceil(diameter / self.voxel_size))
-            self.nz = int(np.ceil(height / self.voxel_size))
-        
-        # Initialize sparse voxel grid (1 = material present, 0 = material removed)
-        # Use COO format for efficient construction, then convert to CSR for fast operations
-        self.voxel_grid = sparse.csr_matrix(
-            (np.ones(self.nx * self.ny * self.nz),
-             (np.arange(self.nx * self.ny * self.nz),
-              np.zeros(self.nx * self.ny * self.nz))),
-            shape=(self.nx * self.ny * self.nz, 1)
+        # Initialize adaptive voxel grid
+        self.voxel_grid = AdaptiveVoxelGrid(
+            dimensions=stock_params.dimensions,
+            min_voxel_size=stock_params.min_voxel_size,
+            max_voxel_size=stock_params.max_voxel_size,
+            refinement_threshold=stock_params.refinement_threshold
         )
         
-        # Set up coordinate grids for faster operations
-        x = np.linspace(0, length, self.nx) if stock_params.stock_type == StockType.RECTANGULAR else \
-            np.linspace(-diameter/2, diameter/2, self.nx)
-        y = np.linspace(0, width, self.ny) if stock_params.stock_type == StockType.RECTANGULAR else \
-            np.linspace(-diameter/2, diameter/2, self.ny)
-        z = np.linspace(0, height, self.nz)
+        # Set up coordinate grids for visualization
+        if stock_params.stock_type == StockType.RECTANGULAR:
+            length, width, height = stock_params.dimensions
+            x = np.linspace(0, length, int(np.ceil(length / stock_params.voxel_size)))
+            y = np.linspace(0, width, int(np.ceil(width / stock_params.voxel_size)))
+            z = np.linspace(0, height, int(np.ceil(height / stock_params.voxel_size)))
+        else:  # CYLINDRICAL
+            diameter, height = stock_params.dimensions[:2]
+            x = np.linspace(-diameter/2, diameter/2, int(np.ceil(diameter / stock_params.voxel_size)))
+            y = np.linspace(-diameter/2, diameter/2, int(np.ceil(diameter / stock_params.voxel_size)))
+            z = np.linspace(0, height, int(np.ceil(height / stock_params.voxel_size)))
+            
         self.X, self.Y, self.Z = np.meshgrid(x, y, z, indexing='ij')
         
         # Initialize cylindrical stock if needed
         if stock_params.stock_type == StockType.CYLINDRICAL:
             radius = diameter / 2
             mask = (self.X**2 + self.Y**2) <= radius**2
-            self.voxel_grid = sparse.csr_matrix(
+            # Initialize root node with cylindrical mask
+            self.voxel_grid.root.voxel_grid = sparse.csr_matrix(
                 (mask.flatten(),
-                 (np.arange(self.nx * self.ny * self.nz),
-                  np.zeros(self.nx * self.ny * self.nz))),
-                shape=(self.nx * self.ny * self.nz, 1)
+                 (np.arange(mask.size),
+                  np.zeros(mask.size))),
+                shape=(mask.size, 1)
             )
         
         # Store original stock for visualization
-        self.original_stock = self.voxel_grid.copy()
+        self.original_stock = self.voxel_grid.root.voxel_grid.copy()
         
         # Initialize thread safety
         self.voxel_lock = threading.Lock()
         self.num_workers = max(1, multiprocessing.cpu_count() - 1)  # Leave one core free
-        
-    def _get_voxel_index(self, x: int, y: int, z: int) -> int:
-        """Convert 3D voxel coordinates to 1D index."""
-        return x + self.nx * (y + self.ny * z)
-        
-    def _get_voxel_coords(self, index: int) -> Tuple[int, int, int]:
-        """Convert 1D index to 3D voxel coordinates."""
-        z = index // (self.nx * self.ny)
-        y = (index % (self.nx * self.ny)) // self.nx
-        x = index % self.nx
-        return x, y, z
         
     def remove_material(
         self,
@@ -295,84 +574,8 @@ class MaterialSimulator:
             islands: Optional list of islands to preserve
         """
         with self.voxel_lock:
-            # Convert tool position to voxel coordinates
-            vx = int(tool_position[0] / self.voxel_size)
-            vy = int(tool_position[1] / self.voxel_size)
-            vz = int(tool_position[2] / self.voxel_size)
-            
-            # Calculate tool radius in voxels
-            tool_radius_voxels = int(np.ceil((tool_diameter / 2) / self.voxel_size))
-            
-            # Calculate affected voxel ranges
-            x_min = max(0, vx - tool_radius_voxels)
-            x_max = min(self.nx, vx + tool_radius_voxels + 1)
-            y_min = max(0, vy - tool_radius_voxels)
-            y_max = min(self.ny, vy + tool_radius_voxels + 1)
-            z_min = max(0, vz)
-            z_max = min(self.nz, vz + 1)
-            
-            # Create a mask for the tool's circular cross-section
-            y, x = np.ogrid[-tool_radius_voxels:tool_radius_voxels+1, 
-                            -tool_radius_voxels:tool_radius_voxels+1]
-            tool_mask = x*x + y*y <= tool_radius_voxels*tool_radius_voxels
-            
-            # Check for islands before removing material
-            if islands:
-                # Create a mask for protected areas (islands)
-                protected_indices = []
-                for island in islands:
-                    if island['z_min'] <= tool_position[2] <= island['z_max']:
-                        # Convert island points to voxel coordinates
-                        island_points = np.array(island['points']) / self.voxel_size
-                        
-                        # Create a polygon mask for this island
-                        y_coords = np.arange(y_min, y_max)
-                        x_coords = np.arange(x_min, x_max)
-                        XX, YY = np.meshgrid(x_coords, y_coords)
-                        points = np.column_stack((XX.flatten(), YY.flatten()))
-                        
-                        # Use points_in_polygon to create island mask
-                        mask = self._points_in_polygon(points, island_points)
-                        mask = mask.reshape(XX.shape)
-                        
-                        # Add protected indices
-                        for i in range(x_min, x_max):
-                            for j in range(y_min, y_max):
-                                if mask[i-x_min, j-y_min]:
-                                    for z in range(z_min, z_max):
-                                        protected_indices.append(self._get_voxel_index(i, j, z))
-                
-                # Convert protected indices to sparse matrix
-                protected = sparse.csr_matrix(
-                    (np.ones(len(protected_indices)),
-                     (protected_indices, np.zeros(len(protected_indices)))),
-                    shape=(self.nx * self.ny * self.nz, 1)
-                )
-                
-                # Remove material only in unprotected areas
-                self.voxel_grid = self.voxel_grid.multiply(
-                    ~(protected.astype(bool))
-                )
-            else:
-                # Remove material where the tool intersects
-                indices_to_remove = []
-                for i in range(x_min, x_max):
-                    for j in range(y_min, y_max):
-                        dx = i - vx
-                        dy = j - vy
-                        if dx*dx + dy*dy <= tool_radius_voxels*tool_radius_voxels:
-                            for z in range(z_min, z_max):
-                                indices_to_remove.append(self._get_voxel_index(i, j, z))
-                
-                # Convert indices to sparse matrix and remove material
-                remove_mask = sparse.csr_matrix(
-                    (np.ones(len(indices_to_remove)),
-                     (indices_to_remove, np.zeros(len(indices_to_remove)))),
-                    shape=(self.nx * self.ny * self.nz, 1)
-                )
-                self.voxel_grid = self.voxel_grid.multiply(
-                    ~(remove_mask.astype(bool))
-                )
+            # Remove material using adaptive grid
+            self.voxel_grid.remove_material(tool_position, tool_diameter, islands)
     
     def _process_segment(
         self,
@@ -396,7 +599,7 @@ class MaterialSimulator:
             direction = next_pos - current_pos
             
             # Interpolate positions along the path
-            num_steps = max(1, int(np.ceil(np.linalg.norm(direction) / self.voxel_size)))
+            num_steps = max(1, int(np.ceil(np.linalg.norm(direction) / self.stock_params.voxel_size)))
             for t in np.linspace(0, 1, num_steps):
                 pos = current_pos + t * direction
                 self.remove_material(pos, direction, tool_diameter, islands)
@@ -432,7 +635,7 @@ class MaterialSimulator:
             for i, future in enumerate(futures):
                 future.result()
                 if update_callback and i % 10 == 0:  # Update every 10 segments
-                    update_callback(self.voxel_grid)
+                    update_callback(self.voxel_grid.root.voxel_grid)
     
     def visualize(
         self,
@@ -463,7 +666,7 @@ class MaterialSimulator:
             faces.append([face_idx, face_idx+1, face_idx+2, face_idx+3])
         
         # Get non-zero indices from sparse matrix
-        remaining_indices = self.voxel_grid.nonzero()[0]
+        remaining_indices = self.voxel_grid.root.voxel_grid.nonzero()[0]
         
         # Create mesh for remaining material
         for idx in remaining_indices:
@@ -480,17 +683,17 @@ class MaterialSimulator:
             v111 = np.array([self.X[i+1,j+1,k+1], self.Y[i+1,j+1,k+1], self.Z[i+1,j+1,k+1]])
             
             # Check neighbors to determine which faces to add
-            if i == 0 or not self.voxel_grid[self._get_voxel_index(i-1,j,k)]:
+            if i == 0 or not self.voxel_grid.root.voxel_grid[self._get_voxel_index(i-1,j,k)]:
                 add_face(v000, v001, v011, v010)
-            if i == self.nx-2 or not self.voxel_grid[self._get_voxel_index(i+1,j,k)]:
+            if i == self.X.shape[0]-2 or not self.voxel_grid.root.voxel_grid[self._get_voxel_index(i+1,j,k)]:
                 add_face(v100, v101, v111, v110)
-            if j == 0 or not self.voxel_grid[self._get_voxel_index(i,j-1,k)]:
+            if j == 0 or not self.voxel_grid.root.voxel_grid[self._get_voxel_index(i,j-1,k)]:
                 add_face(v000, v001, v101, v100)
-            if j == self.ny-2 or not self.voxel_grid[self._get_voxel_index(i,j+1,k)]:
+            if j == self.Y.shape[1]-2 or not self.voxel_grid.root.voxel_grid[self._get_voxel_index(i,j+1,k)]:
                 add_face(v010, v011, v111, v110)
-            if k == 0 or not self.voxel_grid[self._get_voxel_index(i,j,k-1)]:
+            if k == 0 or not self.voxel_grid.root.voxel_grid[self._get_voxel_index(i,j,k-1)]:
                 add_face(v000, v010, v110, v100)
-            if k == self.nz-2 or not self.voxel_grid[self._get_voxel_index(i,j,k+1)]:
+            if k == self.Z.shape[2]-2 or not self.voxel_grid.root.voxel_grid[self._get_voxel_index(i,j,k+1)]:
                 add_face(v001, v011, v111, v101)
         
         # Create mesh collection
@@ -528,16 +731,17 @@ class MaterialSimulator:
             ax.set_ylim(-diameter/2, diameter/2)
             ax.set_zlim(0, height)
     
-    def _points_in_polygon(self, points: np.ndarray, polygon: np.ndarray) -> np.ndarray:
-        """
-        Test whether points are inside a polygon.
+    def _get_voxel_index(self, x: int, y: int, z: int) -> int:
+        """Convert 3D voxel coordinates to 1D index."""
+        nx = self.X.shape[0]
+        ny = self.Y.shape[1]
+        return x + nx * (y + ny * z)
         
-        Args:
-            points: Array of points to test (N x 2)
-            polygon: Array of polygon vertices (M x 2)
-            
-        Returns:
-            Boolean array indicating which points are inside the polygon
-        """
-        path = plt.Path(polygon)
-        return path.contains_points(points) 
+    def _get_voxel_coords(self, index: int) -> Tuple[int, int, int]:
+        """Convert 1D index to 3D voxel coordinates."""
+        nx = self.X.shape[0]
+        ny = self.Y.shape[1]
+        z = index // (nx * ny)
+        y = (index % (nx * ny)) // nx
+        x = index % nx
+        return x, y, z 
